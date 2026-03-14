@@ -260,7 +260,7 @@ class ForensicReport(FPDF):
                 if cortex:
                     analysis = cortex.analyze_payload_variant(variant, payload, verdict)
                 else:
-                    # Fallback to Hybrid CortexEngine (GI5 + Granite)
+                    # Fallback to Neural Core
                     try:
                         from backend.ai.cortex import CortexEngine
                         hybrid = CortexEngine()

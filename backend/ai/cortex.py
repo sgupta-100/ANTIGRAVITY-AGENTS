@@ -12,7 +12,7 @@ import time as _time
 #                sigmoid risk scoring, typosquatting detection, threat analysis
 #     Role:     Pre-processor, validator, fast-path, fallback
 #
-#   CORE 2 — GRANITE 4.0 1.5B CODE (Neural / Ollama)
+#   CORE 2 — NEURAL ENGINE (Ollama)
 #     Speed:    1-30 seconds per call
 #     Strengths: Context-aware reasoning, creative payload generation,
 #                semantic analysis, natural language understanding
@@ -20,11 +20,11 @@ import time as _time
 #
 # HYBRID PROTOCOL:
 #   1. GI5 always runs first (fast, reliable, zero-latency)
-#   2. Granite enhances results when available (adds AI context)
-#   3. Results are FUSED: GI5 deterministic + Granite creative = best of both
+#   2. Neural engine enhances results when available (adds AI context)
+#   3. Results are FUSED: GI5 deterministic + Neural creative = best of both
 #   4. If Ollama is offline → GI5 alone still provides full functionality
 #
-# MODEL:   granite4:1b-h (runs entirely on-device via Ollama)
+# MODEL:   antigravity-cortex (runs entirely on-device via Ollama)
 # PROTOCOL: Ollama REST API (http://localhost:11434/api/generate)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -117,11 +117,11 @@ class CortexEngine:
     Antigravity Cortex: HYBRID Dual-Core AI Engine.
 
     Core 1: GI5 OMEGA — Deterministic heuristic engine (always available)
-    Core 2: Granite 4.0 — Neural AI via local Ollama (Hybrid 1B model)
+    Core 2: Neural AI via local Ollama (Hybrid 1B model)
 
     The hybrid architecture ensures:
     - GI5 provides instant deterministic analysis (sanitization, deobfuscation, patterns)
-    - Granite provides deep contextual AI reasoning (creative payloads, semantic judgment)
+    - Neural AI provides deep contextual AI reasoning (creative payloads, semantic judgment)
     - Results are FUSED for maximum intelligence
     - Full functionality even when Ollama is offline (GI5 takes over)
 
@@ -137,7 +137,7 @@ class CortexEngine:
             base_url: Override Ollama URL (default: http://localhost:11434)
             model:    Override model name (default: granite4:1b-h)
         """
-        # ─── CORE 2: Granite 4.0 Neural Engine (Ollama) ───────────────
+        # ─── CORE 2: Neural Engine (Ollama) ───────────────
         self.base_url = (base_url or OLLAMA_BASE_URL).rstrip("/")
         self.model = model or OLLAMA_MODEL
         self.generate_url = f"{self.base_url}/api/generate"
@@ -190,7 +190,7 @@ class CortexEngine:
         # ─── BAYESIAN WEIGHT MATRIX ───────────────────────────────────
         self.bayesian = BayesianWeightMatrix()
 
-        logger.info(f"CORTEX CORE-2 [GRANITE] Model: {self.model} | Endpoint: {self.generate_url}")
+        logger.info(f"CORTEX CORE-2 [NEURAL] Model: {self.model} | Endpoint: {self.generate_url}")
         logger.info("CORTEX HYBRID ENGINE: DUAL-CORE ACTIVE")
 
     # ═══════════════════════════════════════════════════════════════════════

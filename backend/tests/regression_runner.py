@@ -154,13 +154,12 @@ async def run_regression():
                 "description": f"Response status: {resp['status']}. Body extract: {resp['body'][:200]}"
             }
 
-            # 3. Call Hybrid Engine (GI5 + Granite)
+            # 3. Call Neural Engine
             try:
                 audit = await cortex.audit_candidate(candidate_data)
                 
                 pred_is_vuln = audit.get("is_real", False)
                 confidence = audit.get("confidence", 0.0)
-                reason = audit.get("reasoning", "")
             except Exception as e:
                 pred_is_vuln = False
                 confidence = 0.0

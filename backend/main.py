@@ -10,7 +10,7 @@ from backend.api.socket_manager import manager
 async def lifespan(app: FastAPI):
     # --- STARTUP: UNIFIED TRIPLE-PILLAR INITIATION (GSD, RALPH, TESTSPRITE) ---
     print("\n" + "="*50)
-    print("🤖 ANTIGRAVITY IDE: TRIPLE-PILLAR LIFECYCLE START")
+    print("ANTIGRAVITY IDE: TRIPLE-PILLAR LIFECYCLE START")
     print("="*50)
     
     # Check for startup signal from Desktop/Batch
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
         try: os.remove(signal_path)
         except: pass
         
-    print("🚀 Antigravity IDE operational. Triple-Pillar Governance active.\n")
+    print("Antigravity IDE operational. Triple-Pillar Governance active.\n")
     yield
 
 app = FastAPI(title="Antigravity", lifespan=lifespan)
