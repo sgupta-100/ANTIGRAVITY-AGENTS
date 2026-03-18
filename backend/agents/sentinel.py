@@ -60,7 +60,7 @@ class AgentTheta(BaseAgent):
         # print(f"[{self.name}] Sentinel Active. Analyzing DOM Snapshot...")
         
         dom_content = packet.target.payload or {}
-        analysis_result = self.analyze_dom(dom_content)
+        analysis_result = await self.analyze_dom(dom_content)
         
         # If threat detected, publish VULN_CONFIRMED for EACH type
         if analysis_result["risk_score"] > 50:
@@ -94,7 +94,7 @@ class AgentTheta(BaseAgent):
             }
         ))
 
-    def analyze_dom(self, dom: Dict[str, Any]) -> Dict[str, Any]:
+    async def analyze_dom(self, dom: Dict[str, Any]) -> Dict[str, Any]:
         """
         Calculates VisibilityScore and InjectionRiskScore.
         Uses AI for semantic analysis + regex for known patterns.
@@ -122,7 +122,7 @@ class AgentTheta(BaseAgent):
         # 3. CORTEX AI: Semantic Injection Detection (catches novel attacks)
         if self.ai and self.ai.enabled and len(text) > 10:
             try:
-                ai_verdict = self.ai.detect_prompt_injection(text)
+                ai_verdict = await self.ai.detect_prompt_injection(text)
                 if ai_verdict.get("is_injection"):
                     ai_risk = ai_verdict.get("risk_score", 50)
                     technique = ai_verdict.get("technique", "Unknown")
@@ -147,7 +147,7 @@ class AgentTheta(BaseAgent):
         from backend.core.protocol import ResultPacket, Vulnerability
         
         dom_content = packet.target.payload or {}
-        analysis_result = self.analyze_dom(dom_content)
+        analysis_result = await self.analyze_dom(dom_content)
         
         vulnerabilities = []
         status = "SAFE"

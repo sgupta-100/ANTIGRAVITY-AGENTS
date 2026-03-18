@@ -37,6 +37,9 @@ class SigmaAgent(BaseAgent):
         except:
              self.ai = None
 
+        # Stage 10 Hardening: Persistent session for high-concurrency network tasks
+        self._session = None
+
         self.arsenal = {
             "tech_sqli": SQLInjectionProbe(),
             "tech_fuzzer": APIFuzzer(),
@@ -69,16 +72,19 @@ class SigmaAgent(BaseAgent):
                     else:
                         kwargs["json"] = target.payload
                         
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(target.method, target.url, headers=target.headers, **kwargs) as resp:
-                    chunks = []
-                    async for chunk in resp.content.iter_chunked(1024 * 64):
-                        chunks.append(chunk)
-                        if sum(len(c) for c in chunks) > 5 * 1024 * 1024:
-                            break
-                    text = b"".join(chunks).decode("utf-8", errors="replace")
-                    return target, text
+            # Stage 10 Optimization: Reuse persistent session to prevent port exhaustion
+            if self._session is None or self._session.closed:
+                timeout = aiohttp.ClientTimeout(total=10)
+                self._session = aiohttp.ClientSession(timeout=timeout)
+                
+            async with self._session.request(target.method, target.url, headers=target.headers, **kwargs) as resp:
+                chunks = []
+                async for chunk in resp.content.iter_chunked(1024 * 64):
+                    chunks.append(chunk)
+                    if sum(len(c) for c in chunks) > 5 * 1024 * 1024:
+                        break
+                text = b"".join(chunks).decode("utf-8", errors="replace")
+                return target, text
         except Exception as e:
             return target, ""
 
@@ -212,6 +218,7 @@ class SigmaAgent(BaseAgent):
             payload={
                 "job_id": packet.id,
                 "status": "SUCCESS",
+                "target_url": packet.target.url,
                 "data": {"generated_payloads": final_payloads}
             }
         ))

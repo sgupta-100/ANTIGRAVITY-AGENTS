@@ -34,6 +34,12 @@ class OmegaAgent(BaseAgent):
 
     async def initiate_campaign(self, target_url: str):
         # 1. STRATEGY GENERATION (AI-Powered + Context)
+        hypotheses = [
+            "Changing user_id may expose another user's data",
+            "Negative price may bypass payment validation",
+            "JWT algorithm change may bypass verification",
+            "Auth bypass -> IDOR -> Data Extraction"
+        ]
         
         # Try AI strategy selection first
         strategy = None
@@ -44,21 +50,15 @@ class OmegaAgent(BaseAgent):
             except Exception as e:
                 print(f"[{self.name}]: CORTEX strategy failed: {e}")
         
-        # Fallback: Keyword-based detection
-        if not strategy:
-            ecommerce_keywords = ["shop", "store", "buy", "cart", "checkout", "order"]
-            is_ecommerce = any(k in target_url.lower() for k in ecommerce_keywords)
+        if not strategy or strategy not in ["E_COMMERCE_BLITZ", "BLITZKRIEG", "LOW_AND_SLOW"]:
+            strategy = "MULTI_STEP_EXPLOIT"
             
-            if is_ecommerce:
-                strategy = "E_COMMERCE_BLITZ"
-                print(f"[{self.name}]: [E-COMMERCE] DETECTED. Deploying 'The Tycoon' & 'The Skipper'.")
-            else:
-                strategy = self._generate_mixed_strategy()
-        
+        selected_hypothesis = random.choice(hypotheses)
+            
         await self.bus.publish(HiveEvent(
             type=EventType.LOG,
             source=self.name,
-            payload={"message": f"👑 OMEGA: Initiating Campaign '{target_url}' with Strategy: {strategy}"}
+            payload={"message": f"👑 OMEGA: Initiating Campaign '{target_url}' | Strategy: {strategy} | Hypothesis: {selected_hypothesis}"}
         ))
 
         # 2. CAMPAIGN CHAINING
@@ -76,27 +76,12 @@ class OmegaAgent(BaseAgent):
                     ai_mode=True
                 )
             )
-            # Specialized Packet for Skipper (Workflow)
-            skipper_packet = JobPacket(
-                 priority=TaskPriority.HIGH,
-                 target=target,
-                 config=ModuleConfig(
-                     module_id="logic_skipper",
-                     agent_id=AgentID.ALPHA,
-                     aggression=7,
-                     ai_mode=True,
-                     ai_payloads = await self.ai.generate_attack_payloads(
-                     target_url=target_url,
-                     attack_types=["XSS", "SQLi", "SSTI", "Path Traversal"]
-                 ) if self.ai and self.ai.enabled else None
-                 )
-            )
             await self.dispatch_job(tycoon_packet)
-            await self.dispatch_job(skipper_packet)
             
         else:
-            # Standard Mixed Strategy flows...
-            # Pre-flight: Sigma payload generation
+            # Multi-Step Exploit Flow (Research-Grade Pipeline)
+            
+            # Step 1: Payload Generation (Agent Sigma) - Qwen 2.5 Coder
             sigma_packet = JobPacket(
                 priority=TaskPriority.CRITICAL,
                 target=target,
@@ -104,44 +89,33 @@ class OmegaAgent(BaseAgent):
                     module_id="sigma_forge",
                     agent_id=AgentID.SIGMA,
                     aggression=10,
-                    ai_mode=True
+                    ai_mode=True,
+                    params={"attack_hypothesis": selected_hypothesis}
                 )
             )
             await self.dispatch_job(sigma_packet)
             
-            # Step A: Recon (Agent Alpha)
-            recon_packet = JobPacket(
+            # Step 2: Offensive Execution & Mutation (Agent Beta)
+            beta_packet = JobPacket(
                 priority=TaskPriority.HIGH,
                 target=target,
                 config=ModuleConfig(
-                    module_id="logic_skipper", 
-                    agent_id=AgentID.ALPHA,
-                    aggression=5,
-                    ai_mode=True
-                )
-            )
-            await self.dispatch_job(recon_packet)
-            
-            # Step B: Logic Attack (Agent Gamma)
-            logic_packet = JobPacket(
-                priority=TaskPriority.NORMAL,
-                target=target,
-                config=ModuleConfig(
-                    module_id="logic_tycoon", 
-                    agent_id=AgentID.GAMMA,
+                    module_id="beta_execution", 
+                    agent_id=AgentID.BETA,
                     aggression=8,
                     ai_mode=True
                 )
             )
-            await self.dispatch_job(logic_packet)
-
+            await self.dispatch_job(beta_packet)
+            
+            # Step 3: Analytical Reasoning (Gamma) is handled via event propagation
+            # once Beta executes and captures HTTP responses.
+            
     async def dispatch_job(self, packet: JobPacket):
-        # Convert Pydantic to Dict for JSON serialization in EventBus if needed
-        # Or pass object if handlers handle it. HiveEvent payload is Dict.
         await self.bus.publish(HiveEvent(
             type=EventType.JOB_ASSIGNED,
             source=self.name,
-            payload=packet.model_dump() # SERIALIZE FOR TRANSPORT
+            payload=packet.model_dump()
         ))
 
     def _generate_mixed_strategy(self):

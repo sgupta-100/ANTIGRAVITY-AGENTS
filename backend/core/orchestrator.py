@@ -24,6 +24,7 @@ from backend.agents.inspector import AgentIota # Agent Iota (The Inspector)
 from backend.core.reporting import ReportGenerator # The Voice
 # Hybrid AI Engine for campaign strategy
 from backend.ai.cortex import CortexEngine
+from backend.core.planner import MissionPlanner
 
 logger = logging.getLogger("HiveOrchestrator")
 ai_cortex = CortexEngine()
@@ -199,6 +200,9 @@ class HiveOrchestrator:
         # AWAKENING: The Sentinel and The Inspector (Purple Team Expansion)
         sentinel = AgentTheta(bus)
         inspector = AgentIota(bus) 
+        
+        # AWAKENING: The Mission Planner (V6 Strategic Heart)
+        planner = MissionPlanner(bus)
 
         # 4. Wake Up the Hive
         # DATA WIRING: Pass Mission Profile
@@ -208,7 +212,7 @@ class HiveOrchestrator:
             "scope": target_config.get("url", "")
         }
         
-        agents = [scout, breaker, analyst, strategist, governor, sigma, kappa, sentinel, inspector]
+        agents = [scout, breaker, analyst, strategist, governor, sigma, kappa, sentinel, inspector, planner]
         for agent in agents:
             agent.mission_config = mission_profile # Inject Config
             await agent.start()
@@ -223,12 +227,13 @@ class HiveOrchestrator:
         HiveOrchestrator.active_agents["ZETA"] = governor
         HiveOrchestrator.active_agents["SIGMA"] = sigma
         HiveOrchestrator.active_agents["KAPPA"] = kappa
+        HiveOrchestrator.active_agents["PLANNER"] = planner
         
         # HYBRID AI: Log campaign strategy
         strategy_name = "Dynamic Multi-Core Heuristics"
         logger.info(f"AI Campaign Strategy: {strategy_name}")
             
-        await manager.broadcast({"type": "GI5_LOG", "payload": f"SINGULARITY V5 ONLINE. AI Strategy: {strategy_name}."})
+        await manager.broadcast({"type": "GI5_LOG", "payload": f"SINGULARITY V6 ONLINE. AI Strategy: {strategy_name}."})
         await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Running"}})
 
         # 5. Seed the Mission
@@ -324,10 +329,32 @@ class HiveOrchestrator:
                         print(f"[Orchestrator] AI Report for {scan_id} is now READY and SYNCED with UI.")
                     except asyncio.TimeoutError:
                         print(f"[Orchestrator] Report generation TIMED OUT for {scan_id}. Forcing ready.")
+                        
+                        # V6 BUGFIX: Ensure that the UI transitions from "Finalizing" -> "Completed"
                         stats_db_manager.mark_report_ready(scan_id)
                         await manager.broadcast({"type": "REPORT_READY", "payload": {"id": scan_id}})
+                        await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Completed"}})
+                        
+                        for s in stats_db_manager._stats["scans"]:
+                            if s["id"] == scan_id:
+                                s["status"] = "Completed"
+                                break
+                                
+                        stats_db_manager.flush_immediate()
                     except Exception as ge:
                         print(f"[Orchestrator] Background Report Async Task Error: {ge}")
+                        
+                        # SAFE FALLBACK: If report entirely crashes, still let user exit the "Finalizing" lock loop 
+                        stats_db_manager.mark_report_ready(scan_id)
+                        await manager.broadcast({"type": "REPORT_READY", "payload": {"id": scan_id}})
+                        await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Completed"}})
+                        
+                        for s in stats_db_manager._stats["scans"]:
+                            if s["id"] == scan_id:
+                                s["status"] = "Completed"
+                                break
+                                
+                        stats_db_manager.flush_immediate()
                         import traceback
                         traceback.print_exc()
 

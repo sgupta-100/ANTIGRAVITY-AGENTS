@@ -95,12 +95,21 @@ const NewScan = ({ navigate }) => {
                     console.log("Recon Data:", data.payload);
                     // Filter out our own backend traffic
                     const url = data.payload.url || "";
-                    const isBackendTraffic = url.includes('127.0.0.1:8001') ||
-                        url.includes('localhost:8001') ||
+                    const isBackendTraffic = url.includes('127.0.0.1:8000') ||
+                        url.includes('localhost:8000') ||
+                        url.includes('127.0.0.1:5173') ||
+                        url.includes('localhost:5173') ||
                         url.includes('/api/recon') ||
                         url.includes('/stream');
                     if (!isBackendTraffic) {
-                        setTargets(t => t ? t : url);
+                        setTargets(t => {
+                            if (!t) return url;
+                            const currentTargets = t.split('\n').map(target => target.trim());
+                            if (!currentTargets.includes(url) && currentTargets.length < 20) {
+                                return t + '\n' + url;
+                            }
+                            return t;
+                        });
                     }
                 } else if (data.type === 'ATTACK_HIT') {
                     console.log("Attack Result:", data.payload);

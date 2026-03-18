@@ -43,7 +43,7 @@ class AlphaAgent(BaseAgent):
         depth = len([p for p in path.split('/') if p])
         
         if depth > self.MAX_CRAWL_DEPTH:
-            print(f"[{self.name}] 🛑 MAX_CRAWL_DEPTH ({self.MAX_CRAWL_DEPTH}) exceeded for {url_lower}. Dropping.")
+            print(f"[{self.name}] [STOP] MAX_CRAWL_DEPTH ({self.MAX_CRAWL_DEPTH}) exceeded for {url_lower}. Dropping.")
             return
             
         ctx = self.bus.get_or_create_context(event.scan_id)

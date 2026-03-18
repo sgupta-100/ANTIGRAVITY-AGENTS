@@ -48,15 +48,17 @@ def _sigmoid(x: float) -> float:
     return 1 / (1 + math.exp(-x))
 
 class BayesianWeightMatrix:
-    def __init__(self, save_path="reports/bayesian_weights.json"):
+    def __init__(self, save_path=os.path.join("reports", "bayesian_weights.json")):
         self.save_path = save_path
         self.weights = {}
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
         self.load()
 
     def load(self):
         if os.path.exists(self.save_path):
             try:
-                with open(self.save_path, "r") as f:
+                with open(self.save_path, "r", encoding="utf-8") as f:
                     self.weights = json.load(f)
             except Exception as e:
                 logger.error(f"Failed to load Bayesian weights: {e}")
@@ -91,7 +93,7 @@ class BayesianWeightMatrix:
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "antigravity-cortex"
+OLLAMA_MODEL = "qwen2.5-coder:0.5b"
 OLLAMA_TIMEOUT = 300  # seconds
 
 # ─── OPTIMIZATION: Token Budgets per Method ──────────────────────────────────
@@ -142,6 +144,9 @@ class CortexEngine:
         self.model = model or OLLAMA_MODEL
         self.generate_url = f"{self.base_url}/api/generate"
         self.enabled = True  # Backward compat
+
+        # --- OPTIMIZATION: Persistent Session (Stage 10 Hardening) ---
+        self._session = None 
 
         # --- OPTIMIZATION: Async Semaphore (max 3 concurrent LLM calls) ---
         self._llm_semaphore = asyncio.Semaphore(3)
@@ -251,7 +256,7 @@ class CortexEngine:
     # CORE 2: Granite Neural Engine (Ollama REST) — OPTIMIZED
     # ═══════════════════════════════════════════════════════════════════════
 
-    async def _call_ollama(self, prompt: str, temperature: float = 0.2, max_tokens: int = 256, scan_ctx=None) -> str:
+    async def _call_ollama(self, prompt: str, temperature: float = 0.2, max_tokens: int = 256, scan_ctx=None, model_override: str = None) -> str:
         """Send a prompt to Ollama with circuit breaker + semaphore + cache + telemetry."""
         self._telemetry["llm_calls"] += 1
 
@@ -278,7 +283,7 @@ class CortexEngine:
         safe_prompt = SYSTEM_GUARD + prompt
 
         payload = {
-            "model": self.model,
+            "model": model_override or self.model,
             "prompt": safe_prompt,
             "stream": True,  # 🚀 THE HIDDEN OPTIMIZATION: Stream to unblock CPU
             "options": {
@@ -304,42 +309,47 @@ class CortexEngine:
                 if scan_ctx and getattr(scan_ctx, "is_cancelled", False):
                     raise asyncio.CancelledError()
                     
-                async with aiohttp.ClientSession() as session:
-                    # Stream mode prevents Ollama from blocking the entire HTTP response
-                    async with session.post(self.generate_url, json=payload, timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as response:
-                        response.raise_for_status()
-                        
-                        result_chunks = []
-                        last_eval_count = 0
-                        last_prompt_eval_count = 0
-                        
-                        # Accumulate stream chunks asynchronously
-                        async for line in response.content:
-                            if line:
-                                try:
-                                    chunk = json.loads(line.decode('utf-8'))
-                                    if "response" in chunk:
-                                        result_chunks.append(chunk["response"])
-                                    if "eval_count" in chunk:
-                                        last_eval_count = chunk["eval_count"]
-                                    if "prompt_eval_count" in chunk:
-                                        last_prompt_eval_count = chunk["prompt_eval_count"]
-                                except json.JSONDecodeError:
-                                    continue
-                                    
-                        result = "".join(result_chunks).strip()
-                        self._telemetry["llm_input_tokens"] += last_prompt_eval_count
-                        self._telemetry["llm_output_tokens"] += last_eval_count
+                # Stage 10 Hardening: Lazy initialization of persistent session
+                if self._session is None or self._session.closed:
+                    timeout_cfg = aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)
+                    self._session = aiohttp.ClientSession(timeout=timeout_cfg)
+                    
+                async with self._session.post(self.generate_url, json=payload) as response:
+                    response.raise_for_status()
+                    
+                    result_chunks = []
+                    last_eval_count = 0
+                    last_prompt_eval_count = 0
+                    
+                    # Accumulate stream chunks asynchronously
+                    async for line in response.content:
+                        if line:
+                            try:
+                                # Stage 10: Robust multibyte decoding for Windows/Ollama stream
+                                chunk_str = line.decode('utf-8', errors='replace')
+                                chunk = json.loads(chunk_str)
+                                if "response" in chunk:
+                                    result_chunks.append(chunk["response"])
+                                if "eval_count" in chunk:
+                                    last_eval_count = chunk["eval_count"]
+                                if "prompt_eval_count" in chunk:
+                                    last_prompt_eval_count = chunk["prompt_eval_count"]
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue
+                                
+                    result = "".join(result_chunks).strip()
+                    self._telemetry["llm_input_tokens"] += last_prompt_eval_count
+                    self._telemetry["llm_output_tokens"] += last_eval_count
 
-                        # Telemetry: success
-                        latency = _time.perf_counter() - call_start
-                        self._telemetry["llm_successes"] += 1
-                        self._telemetry["llm_total_latency"] += latency
-                        self._consecutive_failures = 0  # Reset on success
+                    # Telemetry: success
+                    latency = _time.perf_counter() - call_start
+                    self._telemetry["llm_successes"] += 1
+                    self._telemetry["llm_total_latency"] += latency
+                    self._consecutive_failures = 0  # Reset on success
 
-                        # Cache the result
-                        self._set_cached(prompt, result)
-                        return result
+                    # Cache the result
+                    self._set_cached(prompt, result)
+                    return result
 
             except asyncio.CancelledError:
                 # CRITICAL FIX 4: Never swallow CancelledError. Propagate it immediately.
@@ -351,23 +361,14 @@ class CortexEngine:
                 self._check_circuit_breaker("OFFLINE")
                 logger.error(f"CORTEX CORE-2 OFFLINE: Cannot connect to Ollama at {self.base_url}")
                 return "[CORTEX OFFLINE] Ollama is not running. Start it with: ollama serve"
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientResponseError):
                 self._consecutive_failures += 1
                 self._telemetry["llm_timeouts"] += 1
                 self._check_circuit_breaker("TIMEOUT")
-                logger.error(f"CORTEX CORE-2 TIMEOUT: Ollama did not respond within {OLLAMA_TIMEOUT}s")
-                return "[CORTEX TIMEOUT] Model took too long to respond."
-            except aiohttp.ClientResponseError as e:
-                self._consecutive_failures += 1
-                self._telemetry["llm_errors"] += 1
-                self._check_circuit_breaker(f"HTTP_{e.status}")
-                logger.error(f"CORTEX CORE-2 HTTP ERROR: {e.status}")
-                return f"[CORTEX ERROR] HTTP {e.status}: {e.message}"
+                return "[CORTEX TIMEOUT] Neural engine response timed out."
             except Exception as e:
                 self._consecutive_failures += 1
-                self._telemetry["llm_errors"] += 1
-                self._check_circuit_breaker(str(type(e).__name__))
-                logger.error(f"CORTEX CORE-2 UNEXPECTED ERROR: {e}")
+                logger.error(f"CORTEX CORE-2 UNEXPECTED ERROR: {str(e)}")
                 return f"[CORTEX ERROR] {str(e)}"
 
     def _check_circuit_breaker(self, reason: str):
@@ -585,7 +586,7 @@ Output ONLY valid JSON. No markdown. No explanations."""
 
     async def generate_attack_payloads(self, target_url: str, attack_types: List[str] = None, 
                                        target_field_type: str = "unknown", parameter_name: str = "unknown", 
-                                       contextual_notes: str = "", scan_ctx=None) -> List[str]:
+                                       contextual_notes: str = "", scan_ctx=None, auth_type: str = "unknown") -> List[str]:
         """
         HYBRID: Generate attack payloads.
         GI5 → deterministic payload variants (instant)
@@ -608,55 +609,60 @@ Output ONLY valid JSON. No markdown. No explanations."""
                 pass
         gi5_count = len(all_payloads)
 
-        # CORE 2: Granite AI payloads (FAST payload generation prompt)
-        prompt = f"""You are Cortex-FAST-PAYLOAD, a deterministic payload generator embedded inside a production API security scanner.
+        # CORE 2: Sigma Payload Forge (Qwen 2.5 Coder 0.5B via Ollama)
+        prompt = f"""You are Sigma, the weapon-smith agent inside the Antigravity V6 security scanner.
 
-You are not a chatbot.
-You do not explain.
-You do not reason aloud.
-You generate structured attack payload variations only.
-Your output is consumed by autonomous agents.
+Your job is to generate exploit payloads designed to reveal vulnerabilities in APIs.
 
-GLOBAL RULES (MANDATORY)
-1. Output JSON only.
-2. No markdown.
-3. No explanations.
-4. No extra keys.
-5. No duplicate payloads.
-6. Each payload must be under 40 characters.
-7. Maximum payload count: 5.
-8. Do not assume undocumented fields.
-9. Only use context provided.
-10. No exploit instructions.
-If context insufficient -> return empty array.
+Focus on these attack categories:
+SQL injection
+path traversal
+authorization bypass
+parameter tampering
+JWT manipulation
+IDOR mutation
+financial logic manipulation
 
 INPUT FORMAT
-attack_type: {', '.join(attack_types)}
-target_field_type: {target_field_type}
-parameter_name: {parameter_name}
-contextual_notes: Target is {target_url}. {contextual_notes}
+Endpoint: {target_url}
 
-OUTPUT FORMAT (STRICT)
-{{{{
-  "payloads": [
-    "payload1",
-    "payload2"
-  ]
-}}}}
+Parameters:
+{parameter_name} ({target_field_type})
 
-ATTACK TYPE BEHAVIOR RULES
-SQLI: Short boolean-based, UNION only if realistic, no stacked queries.
-IDOR: Numeric increment/decrement, UUID mutation (1-2 chars), no brute force ranges.
-BOLA: Guess common privilege params (is_admin, role, role_id, access_level). Boolean or small int variants.
-JWT: "alg":"none", Remove signature marker, Short header mutations.
-AUTH_BYPASS: Missing token, Empty token, Conflicting header names.
-RACE: Duplicate request markers, idempotency key reuse.
-LOGIC: Skip-step endpoint guess, Direct success endpoint path.
+Authentication:
+{auth_type}
 
-GENERATION RULES
-Keep payloads realistic. Keep them short. Avoid special unicode. Avoid exotic obfuscation. Avoid irrelevant creativity. Do not exceed 5 payloads."""
+Observed behavior:
+{contextual_notes}
 
-        result = await self._call_ollama(prompt, temperature=0.1, max_tokens=150, scan_ctx=scan_ctx)
+TASK
+Generate payloads that mutate parameters to trigger abnormal behavior.
+
+PAYLOAD STRATEGY
+For every parameter produce:
+• logical mutation
+• boundary value
+• encoding variation
+• injection attempt
+
+OUTPUT FORMAT
+Return strict JSON.
+{{
+"payloads":[
+"payload1",
+"payload2",
+"payload3"
+]
+}}
+
+RULES
+• generate 5–8 payloads
+• avoid explanations
+• prioritize exploit realism
+• include encoding variants
+• avoid duplicates"""
+
+        result = await self._call_ollama(prompt, temperature=0.1, max_tokens=300, scan_ctx=scan_ctx, model_override="qwen2.5-coder:0.5b")
         
         # Parse JSON
         if not self._is_error(result):
@@ -736,12 +742,56 @@ Output ONLY the mutated payload. Nothing else. No explanation."""
 
         return original_payload
 
+    def _extract_evidence(self, candidate_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deterministic evidence extraction for small-model reasoning support.
+        """
+        description = str(candidate_data.get("description", "")).lower()
+        baseline = str(candidate_data.get("baseline_response", "")).lower()
+        url = str(candidate_data.get("url", "")).lower()
+        
+        evidence = {
+            "status_changed": False,
+            "data_exposed": False,
+            "auth_level_changed": False,
+            "response_entropy_diff": candidate_data.get("response_entropy", 0.0) / 100.0,
+            "sensitive_fields": []
+        }
+        
+        # 1. Detection: Data Exposure
+        sensitive_keywords = ["email", "secret", "private", "confidential", "balance", "credit_card", "password"]
+        for kw in sensitive_keywords:
+            if kw in description and kw not in baseline:
+                evidence["data_exposed"] = True
+                evidence["sensitive_fields"].append(kw)
+        
+        # 2. Heuristic: Behavioral Keywords (V6 Enhancement)
+        threat_keywords = ["leak", "violation", "idor", "unauthorized", "bypass", "exposed", "unexpected ok"]
+        for tk in threat_keywords:
+            if tk in description:
+                evidence["status_changed"] = True
+                if tk in ["leak", "exposed", "idor"]:
+                    evidence["data_exposed"] = True
+        
+        # 3. Case-Specific Logic
+        if "idor" in description or "leak" in description:
+            evidence["auth_level_changed"] = False 
+            
+        if "200 ok" in description and ("403" in baseline or "401" in baseline):
+             evidence["status_changed"] = True
+             
+        return evidence
+
     # ─── P3: KAPPA — Vulnerability Candidate Audit (HYBRID) ──────────────
+
 
     async def audit_candidate(self, candidate_data: Dict[str, Any], scan_ctx=None) -> Dict[str, Any]:
         """
         HYBRID: Audit vulnerability candidate using FACT/DEEP reasoning boundaries.
         """
+        # Structured Evidence Extraction (Gamma 2.0)
+        evidence_obj = self._extract_evidence(candidate_data)
+        
         # CORE 1: GI5 deterministic analysis
         gi5_result = self._gi5_analyze({
             "text": str(candidate_data.get("description", "")),
@@ -757,82 +807,78 @@ Output ONLY the mutated payload. Nothing else. No explanation."""
 
         risk_score = (gi5_risk * 0.5) + (structural_anomaly * 0.2) + (privilege_delta * 0.2) + (response_entropy * 0.1)
         
-        # We override risk gate if explicitly requested (e.g. regression tests)
+        # Deterministic Heuristics Layer
+        if evidence_obj["data_exposed"] and "idor" in str(candidate_data.get("type", "")).lower():
+            # Force high confidence for clear IDOR evidence
+            return {
+                "is_real": True,
+                "confidence": 0.95,
+                "reasoning": f"Deterministic HEURISTIC: Sensitive data ({evidence_obj['sensitive_fields']}) leaked in IDOR candidate.",
+                "engine": "HEURISTIC_MATCH",
+                "type": "IDOR"
+            }
+
         if candidate_data.get("force_mode"):
             mode = candidate_data["force_mode"]
         elif str(candidate_data.get("tag", "")).startswith("Regression_"):
             mode = "FAST_MODE"
         elif risk_score < 35: 
-            # Reject fast
             return {
-                "is_real": False,
-                "confidence": 0.0,
-                "reasoning": f"Rejected by Risk Gate (Score: {risk_score:.1f})",
-                "engine": "RISK_GATE_REJECT"
+                 "is_real": False,
+                 "confidence": 0.0,
+                 "reasoning": f"Rejected by Risk Gate (Score: {risk_score:.1f})",
+                 "engine": "RISK_GATE_REJECT"
             }
-        elif risk_score > 70:
-            mode = "DEEP_MODE"
         else:
-            mode = "FAST_MODE"
+            mode = "DEEP_MODE"
 
-        prompt = f"""You are Cortex-LLM, a bounded classification component inside a hybrid deterministic security scanner.
-You assist only when deterministic analysis is inconclusive.
-Your purpose is precision, not coverage.
-
-ABSOLUTE RULES
-1. JSON output only
-2. No explanations
-3. No assumptions
-4. No hallucination
-5. Prefer false negatives over false positives
-6. Never override deterministic evidence
-
-EVIDENCE POLICY
-You may classify a vulnerability only if:
-- A boundary violation is explicit
-- Privilege escalation is observable
-- Data ownership breach is clear
-- Workflow integrity is broken
-If evidence is partial or ambiguous -> return NOT VULNERABLE.
-
-CONFIDENCE POLICY
-- 90-100 -> deterministic, repeatable exploit
-- 70-89 -> strong evidence
-- 40-69 -> weak / ambiguous
-- <40 -> insufficient
-Never inflate confidence.
-
-OPERATING MODE: {mode}
+        prompt = f"""You are Gamma, a vulnerability classifier.
 
 INPUT EVIDENCE:
-TYPE: {candidate_data.get('type', 'Unknown')}
-URL: {candidate_data.get('url', 'Unknown')}
-DESCRIPTION / CONTEXT: {self._compress_context(candidate_data.get('description', ''), 500)}
-GI5 DETERMINISTIC OVERRIDE: {'YES' if gi5_is_threat else 'NO'}
+Status Changed: {evidence_obj['status_changed']}
+Data Exposed: {evidence_obj['data_exposed']}
+Auth Level Changed: {evidence_obj['auth_level_changed']}
+Sensitive Fields: {', '.join(evidence_obj['sensitive_fields'])}
 
-"""
-        if mode == "FAST_MODE":
-            prompt += """FAST MODE OUTPUT SCHEMA:
-{
-  "vulnerable": true | false,
-  "type": "SQLI | IDOR | BOLA | XSS | JWT | AUTH_BYPASS | RACE | LOGIC | NONE",
-  "confidence": 0-100
-}
-FAST MODE MUST NOT reason about business logic.
-Output ONLY valid JSON."""
-        else:
-            prompt += """DEEP MODE OUTPUT SCHEMA:
-{
-  "vulnerable": true | false,
-  "type": "SQLI | IDOR | BOLA | XSS | JWT | AUTH_BYPASS | RACE | LOGIC | NONE",
-  "confidence": 0-100,
-  "impact": "LOW | MEDIUM | HIGH | CRITICAL",
-  "cvss_adjustment": "+0.0 to +2.0 or -0.0 to -1.0"
-}
-DEEP MODE must reject weak or speculative signals.
-Output ONLY valid JSON."""
+CONTEXT:
+URL: {candidate_data.get('url')}
+Payload: {candidate_data.get('payload')}
 
-        result = await self._call_ollama(prompt, temperature=0.1, max_tokens=256)
+RULES:
+If data_exposed=true and auth_level_changed=false → IDOR (Insecure Direct Object Reference).
+If status_changed=true after auth bypass attempt → Auth Bypass.
+
+OUTPUT FORMAT: Return ONLY strict JSON.
+EXAMPLE:
+{{
+  "vulnerable": true,
+  "type": "IDOR",
+  "confidence": 95,
+  "evidence": "Sensitive fields leaked."
+}}
+
+RULES:
+• No preamble.
+• Output valid JSON only."""
+
+        # SELF-CONSISTENCY VALIDATION
+        result_pass_1 = await self._call_ollama(prompt, temperature=0.1, max_tokens=300, scan_ctx=scan_ctx, model_override="qwen3.5:0.8b")
+        result_pass_2 = await self._call_ollama(prompt, temperature=0.1, max_tokens=300, scan_ctx=scan_ctx, model_override="qwen3.5:0.8b")
+        
+        result = result_pass_1
+        try:
+            d1 = self._extract_json(result_pass_1) or {}
+            d2 = self._extract_json(result_pass_2) or {}
+            v1 = bool(d1.get("vulnerable", False))
+            v2 = bool(d2.get("vulnerable", False))
+            if v1 != v2:
+                # If mismatch -> mark uncertain
+                d1["vulnerable"] = False
+                d1["confidence"] = 0.0
+                d1["evidence"] = d1.get("evidence", "") + " | Self-consistency failure: dual-pass mismatch."
+                result = json.dumps(d1)
+        except:
+            pass
 
         if self._is_error(result):
             return {
@@ -851,15 +897,14 @@ Output ONLY valid JSON."""
         }
         
         try:
-            if "```json" in result:
-                result = result.split("```json")[1].split("```")[0].strip()
-            elif "```" in result:
-                result = result.split("```")[1].split("```")[0].strip()
-                
-            data = json.loads(result)
-            
-            if not isinstance(data, dict):
-                raise ValueError("JSON is not a dict")
+            data = self._extract_json(result)
+            if not data or not isinstance(data, dict):
+                # Fallback for small models that fail JSON but provide text
+                lower_res = result.lower()
+                if "vulnerable\": true" in lower_res or "vulnerability detected" in lower_res or "access confirmed" in lower_res:
+                    data = {"vulnerable": True, "confidence": 70, "type": "DETECTED", "evidence": "Keyword fallback detection."}
+                else:
+                    raise ValueError("JSON is not a dict or extraction failed")
                 
             verdict["is_real"] = bool(data.get("vulnerable", False))
             
@@ -1168,31 +1213,56 @@ Output 3 bullet points, each starting with '- '."""
         result = await self._call_ollama(prompt, temperature=0.3, max_tokens=300)
         if self._is_error(result):
             # Deterministic Fallback
-            return [
-                f"Antigravity Analysis: {total_vulns} security exposures confirmed at {target_url}.",
-                "Heuristic classification indicates potential for unauthorized data exfiltration.",
-                "Immediate remediation of identified endpoints is mandatory for system integrity."
-            ]
+            if total_vulns == 0:
+                return [
+                    f"Antigravity Analysis: No security exposures confirmed at {target_url}.",
+                    "Heuristic classification indicates robust defense mechanisms.",
+                    "Continuity Protocol: Maintain routine surveillance and security updates."
+                ]
+            else:
+                return [
+                    f"Antigravity Analysis: {total_vulns} security exposures confirmed at {target_url}.",
+                    "Heuristic classification indicates potential for unauthorized data exfiltration.",
+                    "Immediate remediation of identified endpoints is mandatory for system integrity."
+                ]
         
         bullets = [line.strip() for line in result.split("\n") if line.strip().startswith("-")]
-        return bullets[:3] if bullets else [
-            f"Detected {total_vulns} confirmed vulnerabilities.",
-            "High risk of exploitation if left unpatched.",
-            "Review full technical breakdown for remediation steps."
-        ]
+        if bullets:
+            return bullets[:3]
+        else:
+            if total_vulns == 0:
+                return [
+                    "Analysis complete: Zero confirmed vulnerabilities detected.",
+                    "Attack surface appears secure against current test vectors.",
+                    "Recommendation: Continue periodic automated audits."
+                ]
+            else:
+                return [
+                    f"Detected {total_vulns} confirmed vulnerabilities.",
+                    "High risk of exploitation if left unpatched.",
+                    "Review full technical breakdown for remediation steps."
+                ]
 
     async def analyze_attack_paths(self, findings_summary: str) -> str:
         """
         HYBRID: Analyze potential attack paths and strategic impact.
         """
-        prompt = f"""Analyze the strategic impact of these vulnerabilities:
+        if "No vulnerabilities detected" in findings_summary or not findings_summary.strip():
+            prompt = f"""Analyze the strategic impact of this secure posture:
+FINDINGS: {findings_summary}
+Explain why continuous monitoring remains critical even when no vulnerabilities are found.
+Output a single paragraph of approximately 4-5 sentences. Professional tone."""
+            fallback = "The recent security scan resulted in zero confirmed vulnerabilities, indicating a robust attack surface. However, cyber threats are continuously evolving, and new zero-day exploits emerge daily. It is critical to maintain continuous automated monitoring, keep systems patched, and adhere to a zero-trust architecture to ensure the ongoing integrity of the application."
+        else:
+            prompt = f"""Analyze the strategic impact of these vulnerabilities:
 FINDINGS: {findings_summary}
 Explain how an attacker might chain these vulnerabilities to achieve full system compromise.
 Output a single paragraph of approximately 4-5 sentences. Professional tone."""
+            fallback = f"The identified vulnerabilities ({findings_summary}) present a high-risk attack surface. If left unpatched, an adversary could chain these entry points to gain unauthorized access, escalate privileges, and potentially exfiltrate sensitive data. Immediate technical review is required."
 
         result = await self._call_ollama(prompt, temperature=0.4, max_tokens=400)
         if self._is_error(result):
-            return f"The identified vulnerabilities ({findings_summary}) present a high-risk attack surface. If left unpatched, an adversary could chain these entry points to gain unauthorized access, escalate privileges, and potentially exfiltrate sensitive data. Immediate technical review is required to mitigate the systemic risk."
+            return fallback
         
         return result.strip()
 
@@ -1650,6 +1720,12 @@ RECOMMENDATION: one sentence"""
         HYBRID: Generate AI-powered executive summary bullet points for PDF report.
         """
         cat_str = ", ".join(f"{k}: {v}" for k, v in categories.items() if v > 0) or "None"
+        
+        if total_vulns == 0:
+            instructions = "Focus on: robustness of the attack surface, affirmation of security, lack of exploitable vectors, and continued monitoring."
+        else:
+            instructions = "Focus on: overall risk, most critical category, immediate actions, long-term recommendations."
+            
         prompt = f"""You are writing the executive summary for a security assessment PDF.
 
 TARGET: {target_url}
@@ -1658,7 +1734,7 @@ CATEGORIES: {cat_str}
 
 Write exactly 4 concise bullet points for the executive summary.
 Each bullet should be one sentence. No numbering, no dashes, just the text.
-Focus on: overall risk, most critical category, immediate actions, long-term recommendations."""
+{instructions}"""
 
         result = await self._call_ollama(prompt, temperature=0.2, max_tokens=512)
         if self._is_error(result):

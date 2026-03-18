@@ -24,6 +24,9 @@ async function checkBackendHealth() {
     }
 }
 
+// Start health polling to recover if backend Restarts
+setInterval(checkBackendHealth, HEALTH_CHECK_INTERVAL);
+
 /**
  * SafeFetch: Prevents "Failed to fetch" spam by checking backend status first.
  * Silences network errors to keep the console clean in production.

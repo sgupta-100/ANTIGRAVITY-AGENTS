@@ -35,21 +35,34 @@ class BetaAgent(BaseAgent):
     async def setup(self):
         self.bus.subscribe(EventType.JOB_ASSIGNED, self.handle_job)
         self.bus.subscribe(EventType.VULN_CANDIDATE, self.handle_candidate)
+        self.bus.subscribe(EventType.JOB_COMPLETED, self.handle_sigma_payloads)
 
     async def handle_candidate(self, event: HiveEvent):
-        # ... (Existing logic same as before, launching Fuzzers)
+        # Handle polyglot injections on candidate detection
         payload = event.payload
         url = payload.get("url")
         tag = payload.get("tag")
         
         if tag == "API":
-            print(f"[{self.name}] Intercepted API Candidate: {url}. Launching Polyglot Assault.")
+            print(f"[{self.name}] Intercepted API Candidate: {url}. Recall Phase Initiated.")
             
-            # SOTA: AI-Driven Mutation
-            mutated_polyglot = await self.waf_mutate(random.choice(self.polyglots))
+            # RECALL tactics from Kappa (V6 Learning Loop)
+            from backend.core.orchestrator import HiveOrchestrator
+            kappa = HiveOrchestrator.active_agents.get("KAPPA")
+            
+            best_payload = random.choice(self.polyglots) # Default
+            if kappa:
+                try:
+                    results = await kappa.recall_tactics(f"Exploit for {payload.get('type', 'vulnerability')} on {url}")
+                    if results:
+                        best_payload = results[0].get("payload", best_payload)
+                        print(f"[{self.name}] [RECALL SUCCESS] Reusing verified payload: {best_payload}")
+                except Exception as e:
+                    print(f"[{self.name}] [RECALL ERROR] {e}")
+
+            mutated_polyglot = await self.waf_mutate(best_payload)
             print(f"[{self.name}] >> AI Mutation Strategy: {mutated_polyglot}")
             
-            # Launch Generic Fuzzer Job with advanced config
             packet = JobPacket(
                  priority=TaskPriority.HIGH,
                  target=TaskTarget(url=url, payload={"wildcard": mutated_polyglot}),
@@ -66,49 +79,101 @@ class BetaAgent(BaseAgent):
         if packet.config.agent_id != AgentID.BETA:
             return
 
-        # DATA WIRING: Check strict module filtering
-        modules_cfg = getattr(self, "mission_config", {}).get("modules", [])
-        # Map IDs to User-Friendly Names (Simple mapping for MVP)
-        # "SQL Injection" -> "tech_sqli"
-        allowed = True
-        if modules_cfg and "Singularity V5" not in modules_cfg: # If specific selection exists
-             # Very basic mapping for demo
-             if "tech_sqli" in packet.config.module_id and "SQL Injection" not in modules_cfg: allowed = False
-             if "tech_jwt" in packet.config.module_id and "Auth Bypass" not in modules_cfg: allowed = False
-        
-        if not allowed:
-             # print(f"[{self.name}] Skipping {packet.config.module_id} (Not selected in Mission)")
-             return
-            
-        # Cyber-Organism Protocol: Tech Stack Alignment
-        # If headers/url imply PHP, we ensure MySQL syntax
-        target_tech = str(packet.target.url).lower()
-        if "php" in target_tech:
-             print(f"[{self.name}] 🐘 PHP Detected. Aligning Arsenal -> MySQL Syntax.")
-             if packet.config.module_id == "tech_sqli":
-                 packet.config.params["db_type"] = "mysql"
+        print(f"[{self.name}] Received Breaker Job {packet.id}. Standing by for Sigma's Payload Forge.")
+        # Under V6 architecture, Beta waits for Sigma's JOB_COMPLETED to execute payloads.
+        # It no longer delegates execution.
+        pass
 
-        print(f"[{self.name}] Received Breaker Job {packet.id}")
-        await self._execute_packet(packet)
+    async def handle_sigma_payloads(self, event: HiveEvent):
+        """Intercepts Sigma's payload shipments and executes the assault."""
+        if event.source != "agent_sigma": return
+        payload = event.payload
+        
+        data = payload.get("data", {})
+        if "generated_payloads" not in data: return
+        
+        target_url = payload.get("target_url")
+        if not target_url: return
+        
+        payloads = data["generated_payloads"]
+        print(f"[{self.name}] Intercepted {len(payloads)} payloads from Sigma. Commencing RL Adaptive Execution.")
+        
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            for p in payloads:
+                await self.bus.publish(HiveEvent(
+                    type=EventType.LIVE_ATTACK,
+                    source=self.name,
+                    payload={"url": target_url, "arsenal": "Adaptive Fuzzer", "action": "Executing Payload", "payload": p[:50]}
+                ))
+                
+                # Try Original Payload
+                reward = await self._execute_and_eval(session, target_url, p)
+                
+                # ADAPTIVE REINFORCEMENT LEARNING
+                if reward > 0:
+                    print(f"[{self.name}] [+ REWARD] Successful payload interaction. Retaining strategy.")
+                else:
+                    print(f"[{self.name}] [- PENALTY] Payload failed. Executing AI mutation layer.")
+                    mutated = await self.waf_mutate(p)
+                    if mutated != p:
+                        await self.bus.publish(HiveEvent(
+                            type=EventType.LIVE_ATTACK,
+                            source=self.name,
+                            payload={"url": target_url, "arsenal": "RL Mutation", "action": "Retrying Mutated Payload", "payload": mutated[:50]}
+                        ))
+                        await self._execute_and_eval(session, target_url, mutated)
+
+    async def _execute_and_eval(self, session, url: str, p: str):
+        """Executes a payload against a target URL and returns an RL reward score."""
+        try:
+            # We assume a GET request with query params for this example, but it scales
+            target = url + ("&" if "?" in url else "?") + f"test={p}"
+            async with session.get(target, timeout=5) as resp:
+                text = await resp.text()
+                status = resp.status
+                
+                reward = 0
+                evidence = ""
+                text_lower = text.lower()
+                
+                if status >= 500 or "syntax error" in text_lower or "unexpected" in text_lower or "sql" in text_lower:
+                    reward = 1
+                    evidence = "Server threw unhandled logic/syntax error indicating injection vulnerability."
+                elif status == 200 and len(text) > 1000:
+                    # simplistic baseline check: if it dumped huge anomalous output
+                    reward = 1
+                    evidence = "Massive payload return size indicating potential data leak (IDOR/BOLA)."
+                    
+                if reward > 0:
+                    await self.bus.publish(HiveEvent(
+                        type=EventType.VULN_CANDIDATE,
+                        source=self.name,
+                        payload={
+                            "url": url,
+                            "payload": p,
+                            "description": text[:800],
+                            "evidence": evidence
+                        }
+                    ))
+                return reward
+        except Exception as e:
+            return 0
 
     async def waf_mutate(self, payload: str) -> str:
         """
         CORTEX AI: WAF Bypass Mutation Engine
         Uses Ollama to generate intelligent WAF evasion variants.
         """
-        # Try AI First (Ollama Cortex)
         if self.ai and self.ai.enabled:
             try:
                 mutated = await self.ai.mutate_waf_bypass(payload)
                 if mutated and mutated != payload:
-                    print(f"[{self.name}] >> CORTEX AI: WAF Mutation generated.")
                     return mutated
             except Exception as e:
-                print(f"[{self.name}] CORTEX WAF Mutation failed: {e}")
+                pass
 
-        # Fallback to random heuristics
-        strategy = random.choice(["case_swap", "whitespace", "null_byte", "comment_split"])
-        
+        strategy = random.choice(["case_swap", "whitespace", "comment_split"])
         if strategy == "case_swap":
             return "".join([c.upper() if random.random() > 0.5 else c.lower() for c in payload])
         elif strategy == "whitespace":
@@ -117,33 +182,6 @@ class BetaAgent(BaseAgent):
             return payload.replace("SELECT", "SEL/**/ECT")
         return payload
 
-    def _find_zeta(self):
-        # Peer Discovery Hack for MVP: Find instance in bus subscribers (not ideal but works for this scope)
-        # Note: In a real distributed system, this would be an RPC call over the bus.
-        # Here we assume a direct reference if possible, or skip.
-        # WE WILL SKIP DIRECT ZETA CALL HERE TO AVOID COMPLEX OBJECT LOOKUP IN EVENTBUS
-        # Instead, we assume Zeta listens to "JOB_START" events and sends a KILL signal if needed.
-        # But Prompt said "Zeta... DENY the JobPacket". 
-        # So we will implement a mock "Request Permission" if we can't find object.
-        return None
-
     async def _execute_packet(self, packet: JobPacket):
-        # Cyber-Organism Protocol: Pre-Flight Check
-        print(f"[{self.name}] Delegating {packet.config.module_id} to SIGMA Orchestrator on {packet.target.url}")
-        
-        # Forward execution to Sigma. Beta is no longer permitted to execute network IO.
-        sigma_job = JobPacket(
-            priority=packet.priority,
-            target=packet.target,
-            config=ModuleConfig(
-                module_id=packet.config.module_id, 
-                agent_id=AgentID.SIGMA, 
-                params=packet.config.params,
-                aggression=packet.config.aggression
-            )
-        )
-        await self.bus.publish(HiveEvent(
-            type=EventType.JOB_ASSIGNED,
-            source=self.name,
-            payload=sigma_job.model_dump()
-        ))
+        # Legacy compat for manually assigned jobs
+        pass

@@ -90,6 +90,28 @@ class ZetaAgent(BaseAgent):
                 await self.broadcast_signal("INFRA_ROTATE", {"reason": "High Block Rate"})
                 self.error_window.clear()
 
+        # 4. STATISTICAL ANOMALY DETECTION (Z-Score)
+        is_anomaly, reason = self.detect_anomalies()
+        if is_anomaly:
+            print(f"[{self.name}] 🚨 ANOMALY DETECTED: {reason}")
+            await self.broadcast_signal("THROTTLE", {"level": "CRITICAL", "reason": reason})
+            self.error_budget_current -= 10  # Severe penalty for triggering defensive mechanisms
+
+    def detect_anomalies(self) -> tuple[bool, str]:
+        """SOTA: Z-Score Statistical Anomaly Detection for WAF/Firewall triggers."""
+        if len(self.latency_window) > 15:
+            latencies = list(self.latency_window)
+            mean = sum(latencies) / len(latencies)
+            variance = sum((x - mean) ** 2 for x in latencies) / len(latencies)
+            std_dev = max(variance ** 0.5, 0.001)
+            
+            latest_latency = latencies[-1]
+            z_score = (latest_latency - mean) / std_dev
+            
+            if z_score > 3.0: # 3 standard deviations = anomaly (e.g. sudden WAF tarpit)
+                return True, f"Latency Spike Anomaly (Z-Score: {z_score:.2f})"
+        return False, ""
+
     def calculate_jitter(self):
         """
         SOTA: Adaptive Gaussian Jitter.

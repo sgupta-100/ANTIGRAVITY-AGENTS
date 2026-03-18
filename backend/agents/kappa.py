@@ -1,6 +1,9 @@
 import asyncio
 import json
 import os
+import math
+import aiohttp
+import time as _time
 from backend.core.hive import BaseAgent, EventType, HiveEvent
 from backend.core.protocol import JobPacket, ResultPacket, AgentID
 
@@ -9,16 +12,14 @@ class KappaAgent(BaseAgent):
     AGENT KAPPA: THE LIBRARIAN
     Role: Knowledge & Memory.
     Capabilities:
-    - Persistent Memory (JSON Store).
-    - Auto-Report Generation (Stub for PDF).
-    - Collaborative Filtering (Recommendation).
+    - Persistent Vector Memory for exploit history.
+    - AI-Driven Semantic Similarity Search.
+    - Anomaly suppression via truth kernel.
     """
     def __init__(self, bus):
         super().__init__("agent_kappa", bus)
-        # GAP FIX: Correct Path inside project
-        # GAP FIX: Correct Path inside project
         base_dir = os.getcwd()
-        self.memory_file = os.path.join(base_dir, "brain", "memory.json")
+        self.memory_file = os.path.join(base_dir, "brain", "exploit_vectors.json")
         
         # Initialize Cortex AI (Local Ollama)
         try:
@@ -30,53 +31,65 @@ class KappaAgent(BaseAgent):
         self._ensure_memory()
 
     def _ensure_memory(self):
-        # Create directory if needed
         os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
         if not os.path.exists(self.memory_file):
             with open(self.memory_file, "w") as f:
                 json.dump([], f)
 
     async def setup(self):
-        # Listen for success stories to archive
         self.bus.subscribe(EventType.VULN_CONFIRMED, self.archive_victory)
-        # GAP FIX: Listen for raw recon data to audit
-        self.bus.subscribe(EventType.VULN_CANDIDATE, self.audit_candidate)
 
-    async def audit_candidate(self, event: HiveEvent):
-        """
-        Antigravity V12: The Forensic Truth Kernel Audit
-        """
-        payload = event.payload
-        # print(f"[{self.name}] [AUDIT] Auditing Candidate: {payload.get('description', 'Unknown')}")
-        
-        # Archive verified finding or just the candidate
-        self._save_record(payload)
+    async def _get_embedding(self, text: str) -> list[float]:
+        """Generate vector embedding using Ollama."""
+        ollama_url = getattr(self.truth_kernel, 'ollama_url', "http://localhost:11434")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{ollama_url}/api/embeddings", json={
+                    "model": "nomic-embed-text", 
+                    "prompt": text
+                }, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("embedding", [])
+                    else:
+                        print(f"[{self.name}] Embedding status error: {resp.status}")
+        except Exception as e:
+            print(f"[{self.name}] Embedding exception: {e}")
+        return []
 
-        # CORTEX AI: Assess candidate validity
-        if self.truth_kernel and self.truth_kernel.enabled:
-            try:
-                verdict = self.truth_kernel.audit_candidate(payload)
-                confidence = verdict.get('confidence', 0.5)
-                is_real = verdict.get('is_real', True)
-                reason = verdict.get('reasoning', 'N/A')
-                print(f"[{self.name}] [AI AUDIT] Real={is_real} Confidence={confidence:.1f} Reason={reason}")
-                
-                if not is_real and confidence > 0.7:
-                    print(f"[{self.name}] [AI AUDIT] FALSE POSITIVE suppressed. Will not escalate.")
-                    return  # Don't escalate false positives
-            except Exception as e:
-                print(f"[{self.name}] [AI AUDIT] CortexEngine error: {e}")
+    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
+        if not vec1 or not vec2 or len(vec1) != len(vec2): return 0.0
+        dot = sum(a*b for a, b in zip(vec1, vec2))
+        norm1 = math.sqrt(sum(a*a for a in vec1))
+        norm2 = math.sqrt(sum(b*b for b in vec2))
+        if norm1 == 0 or norm2 == 0: return 0.0
+        return dot / (norm1 * norm2)
 
     async def archive_victory(self, event: HiveEvent):
         payload = event.payload
-        print(f"[{self.name}] [ARCHIVE] Vulnerability found by {event.source}")
-        self._save_record(payload)
+        print(f"[{self.name}] [ARCHIVE] Verified Vulnerability Exploit Captured. Embedding...")
         
-        # Emit Archive Log for Report
+        # RICHER SCHEMA (V6 Enhancement)
+        archive_data = {
+            "type": payload.get("type", "unknown"),
+            "url": payload.get("url", ""),
+            "payload": payload.get("payload", ""),
+            "confidence": payload.get("confidence", 0.0),
+            "audit_reasoning": payload.get("audit_reasoning", ""),
+            "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Generate Vector Representation
+        text_rep = f"TYPE: {archive_data['type']} | URL: {archive_data['url']} | PAYLOAD: {archive_data['payload']}"
+        embedding = await self._get_embedding(text_rep)
+        archive_data["vector"] = embedding
+        
+        self._save_record(archive_data)
+        
         await self.bus.publish(HiveEvent(
             type=EventType.LOG,
             source=self.name,
-            payload={"message": f"Vector {payload.get('type', 'logic_overflow')} stored in Hive Memory."}
+            payload={"message": f"Vector Memory {archive_data['type']} stored with {len(embedding)}-dim embedding."}
         ))
 
     def _save_record(self, record):
@@ -89,10 +102,21 @@ class KappaAgent(BaseAgent):
         except Exception as e:
             print(f"[{self.name}] Memory Write Error: {e}")
 
-    async def recall_tactics(self, query: str):
-        # Simulating Semantic Search
-        print(f"[{self.name}] Searching archives for: {query}")
+    async def recall_tactics(self, query: str, top_k: int = 3):
+        """Vector memory Semantic Search."""
+        print(f"[{self.name}] Semantic search for: {query}")
+        query_vec = await self._get_embedding(query)
+        if not query_vec: return []
+
         with open(self.memory_file, "r") as f:
             data = json.load(f)
-        # Simple filter
-        return [r for r in data if query in str(r)]
+
+        scored_records = []
+        for rec in data:
+            rec_vec = rec.get("vector", [])
+            if rec_vec:
+                sim = self._cosine_similarity(query_vec, rec_vec)
+                scored_records.append((sim, rec))
+
+        scored_records.sort(key=lambda x: x[0], reverse=True)
+        return [r for sim, r in scored_records[:top_k] if sim > 0.3]
