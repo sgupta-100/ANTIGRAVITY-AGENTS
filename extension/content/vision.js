@@ -75,11 +75,12 @@ function scanDOM() {
                         zIndex: zIndex,
                         fontSize: fontSize
                     },
-                    innerText: el.innerText,
+                    innerText: safeInnerText,
                     antigravity_id: generateId()
                 }
             };
             sendSnapshot(payload, el);
+
         }
     });
 }

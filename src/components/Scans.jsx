@@ -7,6 +7,9 @@ const Scans = ({ navigate }) => {
     const starsRef = useRef(null);
 
     const [scans, setScans] = useState([]);
+    const [progressMap, setProgressMap] = useState({}); // Real-time report progress
+    const messageBuffer = useRef([]);
+    const lastFlush = useRef(Date.now());
     const wsRef = useRef(null);
     const backendHost = '127.0.0.1:8000';
 
@@ -30,34 +33,61 @@ const Scans = ({ navigate }) => {
         wsRef.current = new WebSocket(wsUrl);
         wsRef.current.onopen = () => console.log("Scans: Connected to Real-time Stream");
 
+        const flushBuffer = () => {
+            if (messageBuffer.current.length === 0) return;
+
+            const messages = [...messageBuffer.current];
+            messageBuffer.current = [];
+
+            let shouldFetch = false;
+            const newProgress = { ...progressMap };
+
+            messages.forEach(data => {
+                // 1. Progress Updates (SCAN_UPDATE with progress field)
+                if (data.type === 'SCAN_UPDATE' && data.payload?.progress) {
+                    newProgress[data.payload.id] = data.payload.progress;
+                }
+
+                // 2. Scan Status Update (Trigger Fetch)
+                if (['SCAN_UPDATE', 'GI5_COMPLETE', 'REPORT_READY'].includes(data.type)) {
+                    shouldFetch = true;
+                }
+
+                // 3. Auto-download generated PDF report
+                if (data.type === 'GI5_LOG' && data.payload && data.payload.includes('REPORT GENERATED:')) {
+                    const parts = data.payload.split(/[\\/]/);
+                    const filename = parts[parts.length - 1];
+                    const url = `http://${backendHost}/api/reports/download/${filename}`;
+
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.target = '_blank';
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                }
+            });
+
+            if (Object.keys(newProgress).length > Object.keys(progressMap).length || 
+                JSON.stringify(newProgress) !== JSON.stringify(progressMap)) {
+                setProgressMap(prev => ({ ...prev, ...newProgress }));
+            }
+
+            if (shouldFetch) {
+                fetchScans();
+            }
+        };
+
+        const throttleInterval = setInterval(flushBuffer, 800);
+
         wsRef.current.onmessage = (event) => {
             try {
                 const parsed = JSON.parse(event.data);
-                const processMessage = (data) => {
-                    // 2. Scan Status Update
-                    if (['SCAN_UPDATE', 'GI5_COMPLETE', 'REPORT_READY'].includes(data.type)) {
-                        fetchScans();
-                    }
-
-                    // 3. Auto-download generated PDF report
-                    if (data.type === 'GI5_LOG' && data.payload && data.payload.includes('REPORT GENERATED:')) {
-                        const parts = data.payload.split(/\\|\//);
-                        const filename = parts[parts.length - 1];
-                        const url = `http://${backendHost}/api/reports/download/${filename}`;
-
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.target = '_blank';
-                        a.download = filename;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                    }
-                };
                 if (parsed.type === "BATCH" && Array.isArray(parsed.payload)) {
-                    parsed.payload.forEach(processMessage);
+                    messageBuffer.current.push(...parsed.payload);
                 } else {
-                    processMessage(parsed);
+                    messageBuffer.current.push(parsed);
                 }
             } catch (e) {
                 console.error("WS Error", e);
@@ -73,13 +103,14 @@ const Scans = ({ navigate }) => {
             if (needsRefresh) {
                 fetchScans();
             }
-        }, 3000);
+        }, 5000); // Increased to 5s to reduce overhead
 
         return () => {
             if (wsRef.current) wsRef.current.close();
             clearInterval(pollInterval);
+            clearInterval(throttleInterval);
         };
-    }, [scans]);
+    }, [scans, progressMap]);
 
     // Live Duration Timer - Removed (Was causing lag and excessive re-renders)
     // useEffect(() => { ... }, []);
@@ -266,7 +297,11 @@ const Scans = ({ navigate }) => {
                                                                 <span className={`material-symbols-outlined text-sm ${downloading === scan.id || ((scan.status === 'Finalizing' || (scan.status === 'Completed' && !scan.report_ready))) ? 'animate-spin' : ''}`}>
                                                                     {downloading === scan.id ? 'sync' : ((scan.status === 'Finalizing' || (scan.status === 'Completed' && !scan.report_ready)) ? 'hourglass_empty' : 'download')}
                                                                 </span>
-                                                                {downloading === scan.id ? 'Downloading...' : ((scan.status === 'Finalizing' || (scan.status === 'Completed' && !scan.report_ready)) ? 'Finalizing AI Report...' : 'PDF Download')}
+                                                                {downloading === scan.id 
+                                                                    ? 'Downloading...' 
+                                                                    : ((scan.status === 'Finalizing' || (scan.status === 'Completed' && !scan.report_ready)) 
+                                                                        ? (progressMap[scan.id] || 'Finalizing AI Report...') 
+                                                                        : 'PDF Download')}
                                                             </motion.button>
                                                         </div>
                                                     </td>

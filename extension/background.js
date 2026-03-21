@@ -5,15 +5,15 @@
 // CONFIGURATION
 // ============================================================================
 
-const BACKEND_URL = "http://127.0.0.1:8000";
-const WS_ENDPOINT = "ws://127.0.0.1:8000/stream?client_type=spy";
+const BACKEND_URL = "http://localhost:8000";
+const WS_ENDPOINT = "ws://localhost:8000/stream?client_type=spy";
 
 // ============================================================================
 // BACKEND HEALTH GUARD (Triple-Shield)
 // ============================================================================
 
 let isBackendAlive = true;
-const HEALTH_CHECK_INTERVAL = 10000; // 10s heartbeat
+const HEALTH_CHECK_INTERVAL = 3000; // 3s heartbeat
 
 async function checkBackendHealth() {
     try {
@@ -53,8 +53,9 @@ async function safeFetch(url, options = {}) {
 importScripts('background/active_defense.js');
 
 // Filter out static assets
-const IGNORE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.css', '.js', '.woff', '.woff2', '.ttf', '.svg', '.ico'];
-const IGNORE_METHODS = ['OPTIONS', 'HEAD'];
+// Filter out common high-volume noise, but keep interesting stuff
+const IGNORE_EXTENSIONS = ['.woff', '.woff2', '.ttf']; // Only ignore fonts
+const IGNORE_METHODS = ['HEAD']; // Only ignore HEAD
 
 // Synapse: Headers to capture
 const SENSITIVE_HEADERS = [
@@ -126,18 +127,23 @@ async function flushOfflineQueue() {
                 // Success: remove item from queue
                 queue.shift();
                 chrome.storage.local.set({ spyOfflineQueue: queue }, () => {
-                    setTimeout(flushOfflineQueue, 100);
+                    // FLUSH FAST if we have more
+                    if (queue.length > 0) {
+                        setTimeout(flushOfflineQueue, 10); // 10ms instead of 100ms
+                    } else {
+                        isFlushingQueue = false;
+                    }
                 });
             } else {
                 // Server returned error, backoff
                 isFlushingQueue = false;
-                setTimeout(flushOfflineQueue, 5000);
+                setTimeout(flushOfflineQueue, 2000);
             }
         } catch (err) {
             // Failed: backend still offline, backoff
             isBackendAlive = false;
             isFlushingQueue = false;
-            setTimeout(flushOfflineQueue, 5000); // 5 sec heartbeat
+            setTimeout(flushOfflineQueue, 2000); 
         }
     });
 }

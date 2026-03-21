@@ -1,74 +1,136 @@
-from typing import List
+from typing import List, Dict, Any
 from fastapi import WebSocket
 import json
 import logging
 import asyncio
+import random
+import time
+
+# --- Adaptive 300 Monitoring Logic ---
+def get_display_limit(rps):
+    if rps <= 200:
+        return rps
+    elif rps <= 600:
+        return int(rps * 0.6)
+    else:
+        return 400
+
+def should_emit(event: Dict[str, Any], rps: float) -> bool:
+    # Priority: Always show anomalies or high severity
+    if event.get("anomaly") or event.get("severity") in ["high", "CRITICAL"]:
+        return True
+    
+    # Adaptive sampling for low priority
+    display_limit = get_display_limit(rps)
+    display_rate = display_limit / max(rps, 1)
+    
+    return random.random() < display_rate
+
+async def publish_request_event(data: Dict[str, Any]):
+    # Approximate current RPS based on manager's recent volume
+    # (Simplified for the sake of this implementation)
+    current_rps = getattr(manager, 'recent_rps', 0)
+    
+    if should_emit(data, current_rps):
+        # Format for original Dashboard.jsx
+        formatted_event = {
+            "type": "LIVE_THREAT_LOG",
+            "payload": {
+                "timestamp": data.get("timestamp", time.strftime("%H:%M:%S")),
+                "agent": data.get("agent", "alpha_recon"),
+                "threat_type": data.get("result", "TRAFFIC"),
+                "method": data.get("method", "GET"),
+                "endpoint": data.get("endpoint", data.get("url", "Unknown")[-40:]),
+                "url": data.get("url", "Unknown"),
+                "severity": data.get("severity", "medium").upper(),
+                "risk_score": data.get("risk_score", 15)
+            }
+        }
+        await manager.broadcast(formatted_event)
+
+# ------------------------------------------
 
 class SocketManager:
     def __init__(self):
-        # We separate connections so we know who to broadcast to
         self.ui_connections: List[WebSocket] = []
         self.spy_connections: List[WebSocket] = []
         self.logger = logging.getLogger("Antigravity.SocketManager")
         
-        # ELE-ST FIX 4: Batching & Debouncing
+        self.last_spy_activity = 0.0
         self.message_queue = []
         self._batch_task = None
+        
+        # [NEW] RPS Tracking for Adaptive Sampling
+        self.packet_count = 0
+        self.recent_rps = 0
+        self._rps_task = None
 
-    def _start_batch_task(self):
+    def _start_tasks(self):
         if self._batch_task is None:
             self._batch_task = asyncio.create_task(self._process_batch_queue())
+        if self._rps_task is None:
+            self._rps_task = asyncio.create_task(self._track_rps())
+
+    async def _track_rps(self):
+        """Calculates RPS every second for adaptive sampling."""
+        while True:
+            await asyncio.sleep(1.0)
+            self.recent_rps = self.packet_count
+            self.packet_count = 0
 
     async def _process_batch_queue(self):
+        """Batches messages and sends to UI at 20-30 FPS (50ms interval)."""
         while True:
-            await asyncio.sleep(0.25) # 250ms UI updates
-            if self.message_queue:
-                batch = self.message_queue.copy()
-                self.message_queue.clear()
-                
-                # Format as a grouped BATCH
-                batch_data = {
-                    "type": "BATCH",
-                    "payload": batch
-                }
-                
-                # ELE-ST FIX 6: Forensic Corruption (Bytes Serialization)
-                def sanitize_bytes(obj):
-                    if isinstance(obj, bytes):
-                        return obj.hex()
-                    return str(obj)
+            try:
+                await asyncio.sleep(0.05) 
+                if self.message_queue:
+                    batch = self.message_queue.copy()
+                    self.message_queue.clear()
+                    
+                    def sanitize_bytes(obj):
+                        if isinstance(obj, bytes):
+                            return obj.hex()
+                        return str(obj)
 
-                message = json.dumps(batch_data, default=sanitize_bytes)
-                
-                async def send_with_timeout(connection):
-                    try:
-                        await asyncio.wait_for(connection.send_text(message), timeout=2.0)
-                        return None
-                    except Exception as e:
-                        return connection
+                    async def send_with_timeout(connection, msg):
+                        try:
+                            await asyncio.wait_for(connection.send_text(msg), timeout=1.0)
+                            return None
+                        except Exception:
+                            return connection
 
-                if self.ui_connections:
-                    results = await asyncio.gather(*(send_with_timeout(conn) for conn in self.ui_connections), return_exceptions=True)
-                    for dead in results:
-                        if isinstance(dead, WebSocket) and dead in self.ui_connections:
-                            self.ui_connections.remove(dead)
+                    for event_obj in batch:
+                        message = json.dumps(event_obj, default=sanitize_bytes)
+                        if self.ui_connections:
+                            results = await asyncio.gather(*(send_with_timeout(conn, message) for conn in self.ui_connections), return_exceptions=True)
+                            for dead in results:
+                                if isinstance(dead, WebSocket) and dead in self.ui_connections:
+                                    self.ui_connections.remove(dead)
+            except Exception as e:
+                self.logger.error(f"Batch Error: {e}")
+                await asyncio.sleep(1.0)
+
+    def is_spy_online(self) -> bool:
+        if len(self.spy_connections) > 0:
+            return True
+        return (time.time() - self.last_spy_activity) < 60.0
+
+    async def mark_spy_alive(self):
+        self.last_spy_activity = time.time()
+        self.packet_count += 1 # Count for RPS
 
     async def connect(self, websocket: WebSocket, client_type: str = "ui"):
-        self._start_batch_task()
+        self._start_tasks()
         await websocket.accept()
         if client_type == "spy":
             self.spy_connections.append(websocket)
-            self.logger.info("Spy Extension Connected.")
-            # Notify UIs that Spy is Online
             await self.broadcast_to_ui({
                 "type": "SPY_STATUS",
                 "payload": {"connected": True}
             })
         else:
             self.ui_connections.append(websocket)
-            self.logger.info("UI Client Connected.")
-            # Tell the new UI client if Spy is currently connected
-            spy_is_online = len(self.spy_connections) > 0
+            spy_is_online = self.is_spy_online()
             await websocket.send_text(json.dumps({
                 "type": "SPY_STATUS",
                 "payload": {"connected": spy_is_online}
@@ -77,17 +139,13 @@ class SocketManager:
     def disconnect(self, websocket: WebSocket):
         if websocket in self.spy_connections:
             self.spy_connections.remove(websocket)
-            self.logger.info("Spy Extension Disconnected.")
         elif websocket in self.ui_connections:
             self.ui_connections.remove(websocket)
-            self.logger.info("UI Client Disconnected.")
 
     async def broadcast(self, data: dict):
-        """Broadcasts to UI clients via batch queue."""
         await self.broadcast_to_ui(data)
 
     async def broadcast_to_ui(self, data: dict):
-        # Queue the message instead of sending immediately
         self.message_queue.append(data)
 
 manager = SocketManager()

@@ -150,46 +150,61 @@ const Dashboard = ({ navigate }) => {
         fetchStats();
         const interval = setInterval(fetchStats, 5000);
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/stream?client_type=ui`;
+        let reconnectTimer = null;
 
-        wsRef.current = new WebSocket(wsUrl);
-        wsRef.current.onopen = () => console.log("Dashboard: Connected to Real-time Stream");
+        const connectWs = () => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${backendHost}/stream?client_type=ui`;
 
-        wsRef.current.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                statsBuffer.current.push(data);
+            wsRef.current = new WebSocket(wsUrl);
+            wsRef.current.onopen = () => console.log("Dashboard: Connected to Real-time Stream");
 
-                // Auto-download generated PDF report
-                if (data.type === 'GI5_LOG' && data.payload && data.payload.includes('REPORT GENERATED:')) {
-                    const parts = data.payload.split(/\\|\//);
-                    const filename = parts[parts.length - 1];
-                    const url = `http://${backendHost}/api/reports/download/${filename}`;
+            wsRef.current.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    statsBuffer.current.push(data);
 
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.target = '_blank';
-                    a.download = filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    // Auto-download generated PDF report
+                    if (data.type === 'GI5_LOG' && data.payload && data.payload.includes('REPORT GENERATED:')) {
+                        const parts = data.payload.split(/\\|\//);
+                        const filename = parts[parts.length - 1];
+                        const url = `http://${backendHost}/api/reports/download/${filename}`;
+
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.target = '_blank';
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    }
+
+                    if (!bufferTimer.current) {
+                        bufferTimer.current = requestAnimationFrame(() => {
+                            flushBuffer();
+                            bufferTimer.current = null;
+                        });
+                    }
+                } catch (e) {
+                    console.error("WS Graph Error", e);
                 }
+            };
 
-                if (!bufferTimer.current) {
-                    bufferTimer.current = requestAnimationFrame(() => {
-                        flushBuffer();
-                        bufferTimer.current = null;
-                    });
-                }
-            } catch (e) {
-                console.error("WS Graph Error", e);
-            }
+            wsRef.current.onclose = () => {
+                console.log("Dashboard: WS Connection closed. Reconnecting in 3 seconds...");
+                reconnectTimer = setTimeout(connectWs, 3000);
+            };
         };
+
+        connectWs();
 
         return () => {
             clearInterval(interval);
-            if (wsRef.current) wsRef.current.close();
+            clearTimeout(reconnectTimer);
+            if (wsRef.current) {
+                wsRef.current.onclose = null; // Prevent reconnect on unmount
+                wsRef.current.close();
+            }
         };
     }, []);
 

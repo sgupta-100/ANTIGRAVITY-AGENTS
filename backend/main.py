@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
+import asyncio
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from backend.api.endpoints import recon, attack, reports
@@ -83,6 +84,16 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = "ui"):
                 "type": "SPY_STATUS",
                 "payload": {"connected": False}
             })
+
+@app.websocket("/ws/live")
+async def live_websocket_endpoint(websocket: WebSocket):
+    # Standardized endpoint for live monitoring
+    await manager.connect(websocket, "ui")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 if __name__ == "__main__":
     import uvicorn

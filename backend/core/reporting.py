@@ -317,7 +317,7 @@ class ReportGenerator:
         if cvss >= 4.0: return 'MEDIUM'
         return 'LOW'
 
-    async def generate_report(self, scan_id: str, events: List[Dict[str, Any]], target_url: str, telemetry: Dict[str, Any] = None):
+    async def generate_report(self, scan_id: str, events: List[Dict[str, Any]], target_url: str, telemetry: Dict[str, Any] = None, manager: Any = None):
         """
         Generate the professional PDF report matching specimen PS_1-PS_4 images.
         
@@ -326,6 +326,7 @@ class ReportGenerator:
             events: List of scan events
             target_url: Target URL scanned
             telemetry: Optional dict with scan telemetry data
+            manager: Optional WebSocket manager for real-time progress broadcast
         """
         try:
             pdf = SecurityReportPDF()
@@ -477,152 +478,200 @@ class ReportGenerator:
                 pdf.add_page()
                 pdf.add_section_title("Detailed Findings")
                 
-                # Group findings by category for FILTER headers
-                categories = {}
-                for vn in vuln_events:
-                    payload_v = vn.get('payload', {})
-                    vt = str(payload_v.get('type', 'UNKNOWN')).upper()
-                    cat = await cortex.categorize_vulnerability(vt)
-                    categories.setdefault(cat, []).append(vn)
+            # ================================================================
+            # V6 OPTIMIZATION: PARALLEL AI ENRICHMENT
+            # ================================================================
+            if manager:
+                await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Finalizing", "progress": "Waking up AI engines..."}})
 
-                finding_count = 0
-                for cat_name, cat_findings in categories.items():
-                    pdf.add_filter_header(cat_name)
+            async def enrich_vulnerability(v, idx, total):
+                p = v.get('payload', {})
+                vt = str(p.get('type', 'UNKNOWN')).upper()
+                vu = str(p.get('url', target_url)).strip().lower()
+                vd = str(p.get('payload', p.get('data', 'N/A')))
+                
+                # Parallelize enrichment calls for this finding
+                tasks = [
+                    cortex.adjust_cvss_score(self._lookup_cwe(vt)['base_cvss'], vt, vu),
+                    cortex.generate_vulnerability_summary(vt, vd, vu),
+                    cortex.reconstruct_forensic_evidence(vt, vd, "HTTP/1.1 200 OK", vu),
+                    cortex.generate_remediation_code(vt, "Web Framework"),
+                    cortex.categorize_vulnerability(vt)
+                ]
+                
+                results = await asyncio.gather(*tasks)
+                
+                if manager:
+                    await manager.broadcast({
+                        "type": "SCAN_UPDATE", 
+                        "payload": {
+                            "id": scan_id, 
+                            "status": "Finalizing", 
+                            "progress": f"AI Forensic Analysis: {idx+1}/{total} ({vt})"
+                        }
+                    })
+                
+                return {
+                    "cvss_score": results[0],
+                    "summary": results[1],
+                    "recon": results[2],
+                    "remedy": results[3],
+                    "category": results[4],
+                    "event": v
+                }
+
+            # Limit to top 15 unique findings to prevent LLM fatigue
+            to_enrich = vuln_events[:15]
+            enriched_data = []
+            if to_enrich:
+                try:
+                    # Stage 10 Hardening: Total 10-minute cap for enrichment phase
+                    enriched_data = await asyncio.wait_for(
+                        asyncio.gather(*[enrich_vulnerability(v, i, len(to_enrich)) for i, v in enumerate(to_enrich)]),
+                        timeout=600.0
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[REPORTER] AI Enrichment timed out for {scan_id}. Proceeding with partial data.")
+                    # Background logic: if it timed out, some tasks might still be running or failed.
+                    # We just move on to ensure the scan eventually hits 'Completed'.
+            else:
+                enriched_data = []
+
+            # Group findings by category for FILTER headers
+            categories = {}
+            for res in enriched_data:
+                categories.setdefault(res['category'], []).append(res)
+
+            finding_count = 0
+            for cat_name, cat_findings in categories.items():
+                pdf.add_filter_header(cat_name)
+                
+                for res in cat_findings:
+                    finding_count += 1
+                    v = res['event']
                     
-                    for v in cat_findings:
-                        finding_count += 1
-                        
-                        # --- Each finding on a NEW PAGE (after the first in category) ---
-                        if finding_count > 1:
-                            pdf.add_page()
-                        
-                        payload = v.get('payload', {})
-                        v_type = str(payload.get('type', 'UNKNOWN')).upper()
-                        v_url = str(payload.get('url', target_url)).strip().lower()
-                        v_data = payload.get('payload', payload.get('data', 'N/A'))
-                        v_method = str(payload.get('method', 'GET')).upper()
-                        v_param = str(payload.get('param', payload.get('parameter', 'N/A')))
-                        v_headers = payload.get('headers', {})
-                        
-                        # CWE lookup
-                        cwe_data = self._lookup_cwe(v_type)
-                        cwe_id = cwe_data['cwe']
-                        finding_name = cwe_data['name']
-                        base_cvss = cwe_data['base_cvss']
-                        
-                        # AI-adjusted CVSS
-                        score_raw = base_cvss
-                        if finding_count <= 10:
-                            score_raw = await cortex.adjust_cvss_score(base_cvss, v_type, v_url)
-                        cvss_score = round(float(score_raw), 1) if score_raw else base_cvss
-                        severity = self._classify_severity(cvss_score)
-                        threat_score = int(cvss_score * 10)
-                        
-                        # AI summary
-                        summary = None
-                        recon = {"root_cause": "Insufficient input validation."}
-                        remedy = "# Remediation: Ensure all inputs are validated against a strict schema."
-                        
-                        if finding_count <= 10:
-                            summary = await cortex.generate_vulnerability_summary(v_type, str(v_data), v_url)
-                            recon = await cortex.reconstruct_forensic_evidence(v_type, str(v_data), "HTTP/1.1 200 OK", v_url)
-                            remedy = await cortex.generate_remediation_code(v_type, "Web Framework")
-                        
-                        # ---- FINDING HEADER (Specimen PS_2 top) ----
-                        pdf.add_finding_header(finding_count, finding_name)
-                        
-                        # Severity Badge
-                        pdf.add_severity_badge(severity)
-                        
-                        # CWE + CVSS metadata
-                        pdf.add_key_value("CWE", cwe_id)
-                        pdf.add_key_value("CVSS Score", f"{cvss_score} ({severity})")
-                        
-                        # Threat Score Bar
-                        pdf.add_risk_meter(threat_score)
-                        
-                        # ---- DESCRIPTION (Specimen PS_2 middle) ----
-                        pdf.set_font('Arial', 'B', 12)
-                        pdf.set_text_color(*pdf.DARK_BLUE)
-                        pdf.cell(0, 8, "Description:", ln=True)
-                        desc_list = summary.get('description', []) if summary else [f"Vulnerability '{finding_name}' detected in target endpoint."]
-                        if isinstance(desc_list, str): desc_list = [desc_list]
-                        pdf.add_bullet_list(desc_list)
-                        
-                        # ---- IMPACT ----
-                        pdf.set_font('Arial', 'B', 12)
-                        pdf.cell(0, 8, "Impact:", ln=True)
-                        impact_list = summary.get('impact', []) if summary else ["Unauthorized access to system resources confirmed."]
-                        if isinstance(impact_list, str): impact_list = [impact_list]
-                        pdf.add_bullet_list(impact_list)
-                        
-                        # ---- EXPLANATION (Agent Narrative) ----
-                        pdf.add_explainability_panel(
-                            f"Agent Gamma flagged this interaction based on high-confidence heuristic anomalies. "
-                            f"Pattern '{v_type}' was intercepted to protect system integrity."
-                        )
-                        
-                        # ---- FORENSIC ANALYSIS (Specimen PS_2 bottom) ----
-                        pdf.add_section_title("Forensic Analysis", pdf.DARK_BLUE)
-                        pdf.set_font('Courier', '', 10)
-                        forensic_text = (
-                            f"Method: {v_method} | Param: {v_param}\n"
-                            f"URL: {v_url}\n"
-                            f"Analysis: {recon.get('root_cause', 'Insufficient input validation.')}"
-                        )
-                        pdf.multi_cell(0, 6, forensic_text)
-                        pdf.ln(5)
-                        
-                        # ---- PAYLOAD DECOMPOSITION TABLE (Specimen PS_2 bottom) ----
-                        pdf.add_table("Table 1: Payload Decomposition", ["Component", "Value", "Technical Function"], [
-                            [v_param if v_param != 'N/A' else "Target ID", str(v_data)[:30], f"Direct reference to target resource."],
-                            ["Access Check", "Missing", f"Application fails to verify authorization."],
-                            ["Result", "200 OK", f"Server returns data for unauthorized request."]
-                        ], [40, 70, 80])
-                        
-                        # ---- PAYLOAD SPECIFICATIONS BOX (Specimen PS_3 top) ----
-                        pdf.add_snapshot_box([
-                            f"Vector Category: {finding_name}",
-                            f"Raw Payload:     {v_data}",
-                            f"Encoded:         {str(v_data).encode().hex()[:40]}",
-                            f"Encoding Type:   None"
-                        ], "Payload Specifications")
-                        
-                        # ---- REPRODUCTION COMMAND ----
-                        pdf.set_font('Arial', 'B', 11)
-                        pdf.cell(0, 8, "Reproduction Command:", ln=True)
-                        curl_cmd = f"curl -X {v_method} '{v_url}'"
-                        if v_headers:
-                            for hk, hv in (v_headers.items() if isinstance(v_headers, dict) else []):
-                                curl_cmd += f" -H '{hk}: {hv}'"
-                        pdf.add_code_block(curl_cmd)
-                        
-                        # ---- HTTP TRAFFIC SNAPSHOT (Specimen PS_3 middle) ----
-                        pdf.set_font('Arial', 'B', 12)
-                        pdf.set_text_color(*pdf.DARK_BLUE)
-                        pdf.cell(0, 8, "HTTP Traffic Snapshot:", ln=True)
-                        pdf.add_snapshot_box(
-                            f"{v_method} {v_url} HTTP/1.1\nHost: target\n{json.dumps(v_headers if isinstance(v_headers, dict) else {}, indent=2)}",
-                            "Request"
-                        )
-                        pdf.add_snapshot_box(
-                            'HTTP/1.1 200 OK\nContent-Type: application/json\n\n{"status": "vulnerable", "data": "revealed"}',
-                            "Response"
-                        )
-                        
-                        # ---- REMEDIATION (Specimen PS_3 bottom, green title) ----
-                        pdf.ln(10)
-                        pdf.set_font('Arial', 'B', 14)
-                        pdf.set_text_color(*pdf.SUCCESS_GREEN)
-                        pdf.cell(0, 10, "Remediation:", ln=True)
-                        remedy_list = summary.get('remediation', []) if summary else ["Implement strict input validation."]
-                        if isinstance(remedy_list, str): remedy_list = [remedy_list]
-                        pdf.add_bullet_list(remedy_list)
-                        
-                        # ---- RECOMMENDED CODE FIX ----
-                        pdf.add_subsection_title("Recommended Code Fix:")
-                        code_fix = summary.get('code_fix') if summary else remedy
-                        pdf.add_code_block(code_fix or "# Remediation: Use secure coding patterns.")
+                    # --- Each finding on a NEW PAGE (after the first in category) ---
+                    if finding_count > 1:
+                        pdf.add_page()
+                    
+                    payload = v.get('payload', {})
+                    v_type = str(payload.get('type', 'UNKNOWN')).upper()
+                    v_url = str(payload.get('url', target_url)).strip().lower()
+                    v_data = payload.get('payload', payload.get('data', 'N/A'))
+                    v_method = str(payload.get('method', 'GET')).upper()
+                    v_param = str(payload.get('param', payload.get('parameter', 'N/A')))
+                    v_headers = payload.get('headers', {})
+                    
+                    # CWE lookup
+                    cwe_data = self._lookup_cwe(v_type)
+                    cwe_id = cwe_data['cwe']
+                    finding_name = cwe_data['name']
+                    base_cvss = cwe_data['base_cvss']
+                    
+                    # USE PRE-ENRICHED DATA
+                    cvss_score = round(float(res['cvss_score']), 1)
+                    severity = self._classify_severity(cvss_score)
+                    threat_score = int(cvss_score * 10)
+                    summary = res['summary']
+                    recon = res['recon']
+                    remedy = res['remedy']
+                    
+                    # ---- FINDING HEADER (Specimen PS_2 top) ----
+                    pdf.add_finding_header(finding_count, finding_name)
+                    
+                    # Severity Badge
+                    pdf.add_severity_badge(severity)
+                    
+                    # CWE + CVSS metadata
+                    pdf.add_key_value("CWE", cwe_id)
+                    pdf.add_key_value("CVSS Score", f"{cvss_score} ({severity})")
+                    
+                    # Threat Score Bar
+                    pdf.add_risk_meter(threat_score)
+                    
+                    # ---- DESCRIPTION (Specimen PS_2 middle) ----
+                    pdf.set_font('Arial', 'B', 12)
+                    pdf.set_text_color(*pdf.DARK_BLUE)
+                    pdf.cell(0, 8, "Description:", ln=True)
+                    desc_list = summary.get('description', []) if summary else [f"Vulnerability '{finding_name}' detected in target endpoint."]
+                    if isinstance(desc_list, str): desc_list = [desc_list]
+                    pdf.add_bullet_list(desc_list)
+                    
+                    # ---- IMPACT ----
+                    pdf.set_font('Arial', 'B', 12)
+                    pdf.cell(0, 8, "Impact:", ln=True)
+                    impact_list = summary.get('impact', []) if summary else ["Unauthorized access to system resources confirmed."]
+                    if isinstance(impact_list, str): impact_list = [impact_list]
+                    pdf.add_bullet_list(impact_list)
+                    
+                    # ---- EXPLANATION (Agent Narrative) ----
+                    pdf.add_explainability_panel(
+                        f"Agent Gamma flagged this interaction based on high-confidence heuristic anomalies. "
+                        f"Pattern '{v_type}' was intercepted to protect system integrity."
+                    )
+                    
+                    # ---- FORENSIC ANALYSIS (Specimen PS_2 bottom) ----
+                    pdf.add_section_title("Forensic Analysis", pdf.DARK_BLUE)
+                    pdf.set_font('Courier', '', 10)
+                    forensic_text = (
+                        f"Method: {v_method} | Param: {v_param}\n"
+                        f"URL: {v_url}\n"
+                        f"Analysis: {recon.get('root_cause', 'Insufficient input validation.')}"
+                    )
+                    pdf.multi_cell(0, 6, forensic_text)
+                    pdf.ln(5)
+                    
+                    # ---- PAYLOAD DECOMPOSITION TABLE (Specimen PS_2 bottom) ----
+                    pdf.add_table("Table 1: Payload Decomposition", ["Component", "Value", "Technical Function"], [
+                        [v_param if v_param != 'N/A' else "Target ID", str(v_data)[:30], f"Direct reference to target resource."],
+                        ["Access Check", "Missing", f"Application fails to verify authorization."],
+                        ["Result", "200 OK", f"Server returns data for unauthorized request."]
+                    ], [40, 70, 80])
+                    
+                    # ---- PAYLOAD SPECIFICATIONS BOX (Specimen PS_3 top) ----
+                    pdf.add_snapshot_box([
+                        f"Vector Category: {finding_name}",
+                        f"Raw Payload:     {v_data}",
+                        f"Encoded:         {str(v_data).encode().hex()[:40]}",
+                        f"Encoding Type:   None"
+                    ], "Payload Specifications")
+                    
+                    # ---- REPRODUCTION COMMAND ----
+                    pdf.set_font('Arial', 'B', 11)
+                    pdf.cell(0, 8, "Reproduction Command:", ln=True)
+                    curl_cmd = f"curl -X {v_method} '{v_url}'"
+                    if v_headers:
+                        for hk, hv in (v_headers.items() if isinstance(v_headers, dict) else []):
+                            curl_cmd += f" -H '{hk}: {hv}'"
+                    pdf.add_code_block(curl_cmd)
+                    
+                    # ---- HTTP TRAFFIC SNAPSHOT (Specimen PS_3 middle) ----
+                    pdf.set_font('Arial', 'B', 12)
+                    pdf.set_text_color(*pdf.DARK_BLUE)
+                    pdf.cell(0, 8, "HTTP Traffic Snapshot:", ln=True)
+                    pdf.add_snapshot_box(
+                        f"{v_method} {v_url} HTTP/1.1\nHost: target\n{json.dumps(v_headers if isinstance(v_headers, dict) else {}, indent=2)}",
+                        "Request"
+                    )
+                    pdf.add_snapshot_box(
+                        'HTTP/1.1 200 OK\nContent-Type: application/json\n\n{"status": "vulnerable", "data": "revealed"}',
+                        "Response"
+                    )
+                    
+                    # ---- REMEDIATION (Specimen PS_3 bottom, green title) ----
+                    pdf.ln(10)
+                    pdf.set_font('Arial', 'B', 14)
+                    pdf.set_text_color(*pdf.SUCCESS_GREEN)
+                    pdf.cell(0, 10, "Remediation:", ln=True)
+                    remedy_list = summary.get('remediation', []) if summary else ["Implement strict input validation."]
+                    if isinstance(remedy_list, str): remedy_list = [remedy_list]
+                    pdf.add_bullet_list(remedy_list)
+                    
+                    # ---- RECOMMENDED CODE FIX ----
+                    pdf.add_subsection_title("Recommended Code Fix:")
+                    code_fix = summary.get('code_fix') if summary else remedy
+                    pdf.add_code_block(code_fix or "# Remediation: Use secure coding patterns.")
+
 
             # ================================================================
             # FINAL PAGE: SCAN TIMELINE (Specimen PS_4)

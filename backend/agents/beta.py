@@ -126,24 +126,54 @@ class BetaAgent(BaseAgent):
 
     async def _execute_and_eval(self, session, url: str, p: str):
         """Executes a payload against a target URL and returns an RL reward score."""
+        import time
+        from datetime import datetime
+        from backend.api.socket_manager import publish_request_event
+        
+        start_t = time.time()
         try:
             # We assume a GET request with query params for this example, but it scales
             target = url + ("&" if "?" in url else "?") + f"test={p}"
             async with session.get(target, timeout=5) as resp:
                 text = await resp.text()
                 status = resp.status
+                latency = int((time.time() - start_t) * 1000)
                 
                 reward = 0
                 evidence = ""
                 text_lower = text.lower()
+                anomaly = False
+                result = "OK"
                 
                 if status >= 500 or "syntax error" in text_lower or "unexpected" in text_lower or "sql" in text_lower:
                     reward = 1
                     evidence = "Server threw unhandled logic/syntax error indicating injection vulnerability."
+                    anomaly = True
+                    result = "ERROR / SYNTAX"
                 elif status == 200 and len(text) > 1000:
                     # simplistic baseline check: if it dumped huge anomalous output
                     reward = 1
                     evidence = "Massive payload return size indicating potential data leak (IDOR/BOLA)."
+                    anomaly = True
+                    result = "DATA LEAK"
+                elif status == 403 or status == 401:
+                    result = "WAF BLOCKED"
+                    
+                # Publish Live Threat Telemetry
+                try:
+                    await publish_request_event({
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "method": "GET",
+                        "endpoint": url.split("?")[0][-30:] if len(url) > 30 else url,
+                        "payload": p[:25],
+                        "status": status,
+                        "latency": latency,
+                        "result": result,
+                        "anomaly": anomaly,
+                        "rps": random.randint(300, 950) # Simulated RPS load for testing adaptive sampling
+                    })
+                except Exception:
+                    pass
                     
                 if reward > 0:
                     await self.bus.publish(HiveEvent(

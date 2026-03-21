@@ -170,11 +170,12 @@ class HiveOrchestrator:
                      msg_type = "GI5_CRITICAL" # Special AI pulse
                 
                 if msg_type:
-                    # Lightweight broadcast for visual effects
+                    # Lightweight broadcast for visual effects + Dashboard row data
                     await manager.broadcast({
                         "type": msg_type,
                         "payload": {
                             "source": event.source,
+                            "url": event.payload.get("url", event.payload.get("target", "System Process")),
                             "timestamp": datetime.now().isoformat()
                         }
                     })
@@ -306,7 +307,7 @@ class HiveOrchestrator:
                         
                         # V6: Add 900s hard timeout (15 mins)
                         await asyncio.wait_for(
-                            report_gen.generate_report(scan_id, scan_events, target_config['url'], telemetry=telemetry),
+                            report_gen.generate_report(scan_id, scan_events, target_config['url'], telemetry=telemetry, manager=manager),
                             timeout=900.0
                         )
                         

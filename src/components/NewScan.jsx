@@ -102,6 +102,12 @@ const NewScan = ({ navigate }) => {
                         url.includes('/api/recon') ||
                         url.includes('/stream');
                     if (!isBackendTraffic) {
+                        // [NEW] Resolve 'Waiting' Status Forever: If we are seeing traffic, we ARE connected.
+                        if (isExtensionEnabled && !isConnected) {
+                            setIsConnected(true);
+                            localConnectedRef.current = true;
+                        }
+                        
                         setTargets(t => {
                             if (!t) return url;
                             const currentTargets = t.split('\n').map(target => target.trim());

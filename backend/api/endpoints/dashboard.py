@@ -57,12 +57,25 @@ async def get_dashboard_stats():
          return {"error": "Unauthorized", "metrics": {}, "graph_data": [], "recent_activity": []}
 
     recent = []
-    for s in stats_db["scans"][:5]:
+    historical_threats = []
+    for s in stats_db["scans"]:
+        # Logic for 'recent' summaries
         recent.append({
             "text": f"Scan {s['status']}: {s['name']}",
             "time": s["timestamp"],
             "type": "info" if s["status"] == "Completed" else "critical"
         })
+        # Logic for pre-populating threat_feed
+        for r in s.get("results", []):
+            payload = r.get("payload", {})
+            historical_threats.append({
+                "timestamp": str(r.get("timestamp", "")).split()[-1][:8] if " " in str(r.get("timestamp", "")) else "History",
+                "agent": r.get("source", "agent_theta"),
+                "threat_type": payload.get("type", "VULNERABILITY"),
+                "url": payload.get("url", s.get("name", "Unknown")),
+                "severity": payload.get("severity", "MEDIUM").upper(),
+                "risk_score": payload.get("data", {}).get("risk_score", 50)
+            })
 
     return {
         "metrics": {
@@ -72,7 +85,8 @@ async def get_dashboard_stats():
             "critical": stats_db["critical"]
         },
         "graph_data": stats_db["history"],
-        "recent_activity": recent
+        "recent_activity": recent[:5],
+        "historical_threats": historical_threats[:60]
     }
 
 @router.get("/scans")
