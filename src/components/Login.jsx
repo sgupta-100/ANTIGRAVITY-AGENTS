@@ -44,7 +44,7 @@ const Login = ({ onLoginSuccess }) => {
                 className="relative z-10 w-full max-w-md p-8 glass-panel-dash rounded-2xl border border-white/10 shadow-2xl backdrop-blur-xl"
             >
                 <div className="text-center mb-8">
-                    <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">Antigravity V4</h1>
+                    <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">VigilAgent</h1>
                     <p className="text-gray-400 text-sm">Hyper-Mind Security Protocol Active</p>
                 </div>
 

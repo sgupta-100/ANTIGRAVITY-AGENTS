@@ -81,7 +81,7 @@ const Library = ({ navigate }) => {
                 </main>
 
                 <footer className="w-full py-6 text-center text-xs text-gray-600 font-light">
-                    Antigravity API Endpoint Scanning System
+                    VigilAgent API Endpoint Scanning System
                 </footer>
             </div>
         </div>

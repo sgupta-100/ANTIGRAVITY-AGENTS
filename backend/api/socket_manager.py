@@ -27,26 +27,36 @@ def should_emit(event: Dict[str, Any], rps: float) -> bool:
     return random.random() < display_rate
 
 async def publish_request_event(data: Dict[str, Any]):
-    # Approximate current RPS based on manager's recent volume
-    # (Simplified for the sake of this implementation)
-    current_rps = getattr(manager, 'recent_rps', 0)
-    
-    if should_emit(data, current_rps):
-        # Format for original Dashboard.jsx
-        formatted_event = {
-            "type": "LIVE_THREAT_LOG",
-            "payload": {
-                "timestamp": data.get("timestamp", time.strftime("%H:%M:%S")),
-                "agent": data.get("agent", "alpha_recon"),
-                "threat_type": data.get("result", "TRAFFIC"),
-                "method": data.get("method", "GET"),
-                "endpoint": data.get("endpoint", data.get("url", "Unknown")[-40:]),
-                "url": data.get("url", "Unknown"),
-                "severity": data.get("severity", "medium").upper(),
-                "risk_score": data.get("risk_score", 15)
+    """Publish a request event with adaptive sampling. Fully error-hardened."""
+    try:
+        if manager is None:
+            return
+        
+        # Approximate current RPS based on manager's recent volume
+        current_rps = getattr(manager, 'recent_rps', 0)
+        
+        if should_emit(data, current_rps):
+            # Format for original Dashboard.jsx
+            url_raw = str(data.get("url", "Unknown"))
+            formatted_event = {
+                "type": "LIVE_THREAT_LOG",
+                "payload": {
+                    "timestamp": data.get("timestamp", time.strftime("%H:%M:%S")),
+                    "agent": data.get("agent", "alpha_recon"),
+                    "threat_type": data.get("result", "TRAFFIC"),
+                    "method": data.get("method", "GET"),
+                    "endpoint": data.get("endpoint", url_raw[-40:]),
+                    "url": url_raw,
+                    "severity": str(data.get("severity", "medium")).upper(),
+                    "risk_score": data.get("risk_score", 15),
+                    "status": data.get("status", 0),
+                    "anomaly": data.get("anomaly", False),
+                    "result": data.get("result", "OK")
+                }
             }
-        }
-        await manager.broadcast(formatted_event)
+            await manager.broadcast(formatted_event)
+    except Exception as e:
+        logging.getLogger("Antigravity.SocketManager").error(f"publish_request_event error: {e}")
 
 # ------------------------------------------
 

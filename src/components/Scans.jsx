@@ -316,7 +316,7 @@ const Scans = ({ navigate }) => {
                 </main>
 
                 <footer className="mt-8 pb-8 text-center text-xs text-gray-500 font-light">
-                    <p>Antigravity API Endpoint Scanning System © 2023</p>
+                    <p>VigilAgent API Endpoint Scanning System © 2023</p>
                 </footer>
             </div>
         </div>

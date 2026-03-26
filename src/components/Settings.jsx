@@ -194,7 +194,7 @@ const Settings = ({ navigate }) => {
                 </main>
 
                 <footer className="relative z-10 w-full py-6 text-center">
-                    <p className="text-xs text-gray-600 font-light tracking-wide">Antigravity API Endpoint Scanning System</p>
+                    <p className="text-xs text-gray-600 font-light tracking-wide">VigilAgent API Endpoint Scanning System</p>
                 </footer>
             </div>
 

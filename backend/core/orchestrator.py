@@ -213,7 +213,36 @@ class HiveOrchestrator:
             "scope": target_config.get("url", "")
         }
         
-        agents = [scout, breaker, analyst, strategist, governor, sigma, kappa, sentinel, inspector, planner]
+        # MODULE-BASED AGENT ROUTING
+        # Core agents always run (recon, memory, planning, defense)
+        core_agents = [scout, kappa, planner, sentinel, inspector]
+        
+        # Offensive agents mapped to modules
+        module_agent_map = {
+            "The Tycoon": [analyst],
+            "The Escalator": [strategist],
+            "The Skipper": [governor],
+            "Doppelganger (IDOR)": [breaker, sigma],
+            "Chronomancer": [breaker, sigma],
+            "SQL Injection Probe": [breaker, sigma],
+            "JWT Token Cracker": [breaker, sigma],
+            "API Fuzzer (REST)": [breaker, sigma],
+            "Auth Bypass Tester": [breaker, sigma],
+        }
+        
+        selected_modules = target_config.get("modules", [])
+        
+        if selected_modules:
+            # Build unique set of agents from selected modules
+            offensive_agents_set = set()
+            for mod in selected_modules:
+                for agent in module_agent_map.get(mod, []):
+                    offensive_agents_set.add(agent)
+            agents = core_agents + list(offensive_agents_set)
+        else:
+            # No modules selected = run everything (backward compatibility)
+            agents = [scout, breaker, analyst, strategist, governor, sigma, kappa, sentinel, inspector, planner]
+        
         for agent in agents:
             agent.mission_config = mission_profile # Inject Config
             await agent.start()

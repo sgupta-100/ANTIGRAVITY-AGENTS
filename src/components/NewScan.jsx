@@ -475,7 +475,7 @@ const NewScan = ({ navigate }) => {
                     </main>
 
                     <footer className="py-8 text-center text-sm text-gray-500">
-                        Antigravity API Endpoint Scanning System
+                        VigilAgent API Endpoint Scanning System
                     </footer>
                 </div>
             </div>

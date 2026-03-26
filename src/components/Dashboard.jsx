@@ -4,10 +4,11 @@ import { motion } from 'framer-motion';
 import { LIQUID_SPRING } from '../lib/constants';
 
 
+const MAX_THREAT_ROWS = 400;
+
 const Dashboard = ({ navigate }) => {
     const [stats, setStats] = useState({
         metrics: { total_scans: 0, active_scans: 0, vulnerabilities: 0, critical: 0 },
-        // V6: New Metrics
         v6_metrics: {
             injections_blocked: 0,
             deceptive_ui_blocked: 0,
@@ -17,11 +18,13 @@ const Dashboard = ({ navigate }) => {
         threat_feed: []
     });
 
-    const [latestThreat, setLatestThreat] = useState(null); // [NEW] For Explainability Panel
+    const [latestThreat, setLatestThreat] = useState(null);
+    const [scanActive, setScanActive] = useState(false);
 
     const wsRef = useRef(null);
     const statsBuffer = useRef([]);
     const bufferTimer = useRef(null);
+    const requestCountRef = useRef(0);
 
     const flushBuffer = () => {
         const events = statsBuffer.current;
@@ -30,13 +33,31 @@ const Dashboard = ({ navigate }) => {
 
         setStats(prev => {
             let nextState = { ...prev };
-            // Process ALL events sequentially
             events.forEach(data => {
+                // SCAN LIFECYCLE: Start populating on scan start, clear on complete
+                if (data.type === 'SCAN_UPDATE') {
+                    const status = data.payload?.status;
+                    if (status === 'Running' || status === 'Initializing') {
+                        setScanActive(true);
+                        // Clear previous data when a NEW scan starts
+                        if (status === 'Initializing') {
+                            nextState.threat_feed = [];
+                            nextState.graph_data = [];
+                            requestCountRef.current = 0;
+                        }
+                    } else if (status === 'Completed' || status === 'Finalizing') {
+                        setScanActive(false);
+                        // Clear threat feed and graph when scan completes
+                        nextState.threat_feed = [];
+                        nextState.graph_data = [];
+                        requestCountRef.current = 0;
+                    }
+                }
+
                 if (data.type === 'VULN_UPDATE') {
                     nextState.metrics = data.payload.metrics || data.payload;
-                    nextState.graph_data = data.payload.history || nextState.graph_data;
                 }
-                else if (['LIVE_THREAT_LOG', 'ATTACK_HIT', 'VULN_CONFIRMED', 'LOG', 'JOB_ASSIGNED', 'RECON_PACKET', 'KEY_CAPTURE'].includes(data.type)) {
+                else if (['LIVE_THREAT_LOG', 'ATTACK_HIT', 'VULN_CONFIRMED', 'LOG', 'JOB_ASSIGNED', 'RECON_PACKET', 'KEY_CAPTURE', 'LIVE_ATTACK_FEED'].includes(data.type)) {
                     if (data.type === 'LIVE_THREAT_LOG') {
                         setLatestThreat(data.payload);
                     }
@@ -90,9 +111,7 @@ const Dashboard = ({ navigate }) => {
                             severity: 'HIGH',
                             risk_score: 85
                         };
-                    }
-
-                    else if (data.type === 'LIVE_ATTACK_FEED') {
+                    } else if (data.type === 'LIVE_ATTACK_FEED') {
                         threat = {
                             timestamp: data.payload.timestamp || new Date().toLocaleTimeString(),
                             agent: data.payload.agent || 'agent_sigma',
@@ -115,14 +134,16 @@ const Dashboard = ({ navigate }) => {
                     newMetrics.risk_score = score;
 
                     nextState.v6_metrics = newMetrics;
-                    nextState.threat_feed = [threat, ...(nextState.threat_feed || [])].slice(0, 50);
-                }
-
-                if (['ATTACK_HIT', 'RECON_PACKET', 'GI5_CRITICAL', 'VULN_CONFIRMED'].includes(data.type)) {
-                    const currentVal = nextState.metrics?.vulnerabilities || 0;
-                    const jitter = Math.random() * 0.5;
-                    const activePoint = currentVal + jitter;
-                    nextState.graph_data = [...(nextState.graph_data || []), activePoint].slice(-30);
+                    // Adaptive 400-row cap (rolling window)
+                    const updatedFeed = [threat, ...(nextState.threat_feed || [])];
+                    nextState.threat_feed = updatedFeed.length > MAX_THREAT_ROWS 
+                        ? updatedFeed.slice(0, MAX_THREAT_ROWS) 
+                        : updatedFeed;
+                    
+                    // Sync graph with request count (Request Activity)
+                    requestCountRef.current += 1;
+                    const requestPoint = requestCountRef.current;
+                    nextState.graph_data = [...(nextState.graph_data || []), requestPoint].slice(-60);
                 }
             });
             return nextState;
@@ -136,12 +157,19 @@ const Dashboard = ({ navigate }) => {
                 const res = await fetch(`http://${backendHost}/api/dashboard/stats`);
                 const data = await res.json();
 
-                // DEFENSIVE MERGE: Ensure v6_metrics exists even if backend is old
                 setStats(prev => ({
                     ...prev,
                     ...data,
+                    // Preserve live threat_feed and graph_data during scan
+                    threat_feed: prev.threat_feed.length > 0 ? prev.threat_feed : (data.threat_feed || []),
+                    graph_data: prev.graph_data.length > 0 ? prev.graph_data : (data.graph_data || []),
                     v6_metrics: data.v6_metrics || { injections_blocked: 0, deceptive_ui_blocked: 0, risk_score: 0 }
                 }));
+                
+                // Detect if there's an active scan
+                if (data.metrics?.active_scans > 0) {
+                    setScanActive(true);
+                }
             } catch (e) {
                 console.error("Failed to fetch dashboard stats", e);
             }
@@ -202,7 +230,7 @@ const Dashboard = ({ navigate }) => {
             clearInterval(interval);
             clearTimeout(reconnectTimer);
             if (wsRef.current) {
-                wsRef.current.onclose = null; // Prevent reconnect on unmount
+                wsRef.current.onclose = null;
                 wsRef.current.close();
             }
         };
@@ -213,7 +241,7 @@ const Dashboard = ({ navigate }) => {
         const maxVal = Math.max(...data, 1);
         const width = 1000;
         const height = 300;
-        const pointWidth = width / (data.length - 1);
+        const pointWidth = width / Math.max(data.length - 1, 1);
         let path = `M0,${height} `;
         data.forEach((val, i) => {
             const x = i * pointWidth;
@@ -229,7 +257,7 @@ const Dashboard = ({ navigate }) => {
         const maxVal = Math.max(...data, 1);
         const width = 1000;
         const height = 300;
-        const pointWidth = width / (data.length - 1);
+        const pointWidth = width / Math.max(data.length - 1, 1);
         let d = "";
         data.forEach((val, i) => {
             const x = i * pointWidth;
@@ -298,6 +326,7 @@ const Dashboard = ({ navigate }) => {
                         </div>
                     )}
 
+                    {/* REQUEST ACTIVITY GRAPH — Synced with Live Threat Monitor */}
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -305,10 +334,21 @@ const Dashboard = ({ navigate }) => {
                         className="glass-panel-dash rounded-2xl p-6 relative overflow-hidden flex flex-col h-[380px]"
                     >
                         <div className="flex justify-between items-center mb-4 relative z-10">
-                            <h2 className="text-sm font-medium text-gray-200">Scan Activity (Last 30 Days)</h2>
+                            <h2 className="text-sm font-medium text-gray-200">Request Activity</h2>
+                            <div className="flex items-center gap-3">
+                                {scanActive && (
+                                    <span className="flex items-center gap-1.5 text-[10px] font-mono text-green-400">
+                                        <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse shadow-[0_0_6px_rgba(74,222,128,0.6)]"></span>
+                                        SCANNING
+                                    </span>
+                                )}
+                                <span className="text-[10px] font-mono text-gray-500">
+                                    {stats.graph_data.length > 0 ? `${requestCountRef.current} requests` : 'Idle'}
+                                </span>
+                            </div>
                         </div>
                         <div className="flex-grow w-full h-full relative z-0 mt-2">
-                            {stats?.graph_data && Array.isArray(stats.graph_data) && stats.graph_data.length > 0 && (
+                            {stats?.graph_data && Array.isArray(stats.graph_data) && stats.graph_data.length > 0 ? (
                                 <svg className="w-full h-full drop-shadow-[0_0_15px_rgba(139,92,246,0.3)]" preserveAspectRatio="none" viewBox="0 0 1000 300">
                                     <defs>
                                         <linearGradient id="lineGradient" x1="0%" x2="100%" y1="0%" y2="0%">
@@ -321,33 +361,34 @@ const Dashboard = ({ navigate }) => {
                                             <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0"></stop>
                                         </linearGradient>
                                     </defs>
-                                    <motion.path
-                                        initial={{ pathLength: 0, opacity: 0 }}
-                                        animate={{ pathLength: 1, opacity: 0.8 }}
-                                        transition={{ duration: 1.5, ease: "easeInOut" }}
-                                        className="transition-all duration-700 ease-in-out"
+                                    <path
+                                        className="transition-all duration-300 ease-in-out"
                                         d={generateGraphPath(stats.graph_data)}
                                         fill="url(#areaGradient)"
-                                    ></motion.path>
-                                    <motion.path
-                                        initial={{ pathLength: 0 }}
-                                        animate={{ pathLength: 1 }}
-                                        transition={{ duration: 2, ease: "easeInOut" }}
-                                        className="animate-draw transition-all duration-700 ease-in-out"
+                                        opacity="0.8"
+                                    ></path>
+                                    <path
+                                        className="transition-all duration-300 ease-in-out"
                                         d={generateLinePath(stats.graph_data)}
                                         fill="none"
                                         stroke="url(#lineGradient)"
                                         strokeLinecap="round"
-                                        strokeWidth="6"
-                                    ></motion.path>
+                                        strokeWidth="3"
+                                    ></path>
                                 </svg>
+                            ) : (
+                                <div className="flex items-center justify-center h-full text-gray-600 opacity-40">
+                                    <div className="text-center">
+                                        <span className="material-symbols-outlined text-3xl block mb-2">show_chart</span>
+                                        <p className="text-xs font-mono">Waiting for scan to start...</p>
+                                    </div>
+                                </div>
                             )}
                         </div>
                     </motion.div>
 
-                    {/* Main Content Grid: Live Threat Monitor (Full Width) */}
-                    <div className="grid grid-cols-1 gap-6 h-[400px]">
-                        {/* LIVE THREAT MONITOR */}
+                    {/* LIVE THREAT MONITOR — Adaptive 400-row rolling window */}
+                    <div className="grid grid-cols-1 gap-6 h-[500px]">
                         <motion.div
                             initial={{ opacity: 0, scale: 0.95 }}
                             animate={{ opacity: 1, scale: 1 }}
@@ -356,11 +397,12 @@ const Dashboard = ({ navigate }) => {
                         >
                             <div className="p-4 border-b border-white/10 bg-black/20 flex justify-between items-center">
                                 <h3 className="text-sm font-medium text-gray-200 flex items-center gap-2">
-                                    <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_red]"></span>
+                                    <span className={`w-2 h-2 rounded-full ${scanActive ? 'bg-red-500 animate-pulse shadow-[0_0_10px_red]' : 'bg-gray-600'}`}></span>
                                     LIVE THREAT MONITOR
                                 </h3>
                                 <div className="flex gap-4 text-xs font-mono text-gray-500">
-                                    <span>STATUS: {stats?.metrics?.active_scans > 0 ? 'ONLINE' : 'STANDBY'}</span>
+                                    <span className="text-gray-600">{stats.threat_feed.length} / {MAX_THREAT_ROWS} max</span>
+                                    <span>STATUS: {scanActive ? 'ONLINE' : 'STANDBY'}</span>
                                 </div>
                             </div>
 
@@ -378,7 +420,6 @@ const Dashboard = ({ navigate }) => {
                                 <div className="absolute inset-0 pointer-events-none bg-[url('https://media.giphy.com/media/oEI9uBYSzLpBK/giphy.gif')] opacity-[0.02]"></div>
 
                                 {stats.threat_feed && stats.threat_feed.length > 0 ? stats.threat_feed.map((item, idx) => {
-                                    // Agent Mapping logic
                                     let agentName = "UNKNOWN";
                                     let agentColor = "text-gray-400";
 
@@ -391,15 +432,15 @@ const Dashboard = ({ navigate }) => {
                                     else if (item.agent?.includes('zeta')) { agentName = "ZETA (CORTEX)"; agentColor = "text-indigo-400"; }
                                     else if (item.agent?.includes('sigma')) { agentName = "SIGMA (SMITH)"; agentColor = "text-green-400"; }
                                     else if (item.agent?.includes('kappa')) { agentName = "KAPPA (LIBRARIAN)"; agentColor = "text-teal-400"; }
+                                    else if (item.agent?.includes('alpha_recon')) { agentName = "ALPHA (RECON)"; agentColor = "text-cyan-400"; }
 
                                     return (
                                         <motion.div
                                             key={`threat-${idx}`}
                                             initial={{ x: -20, opacity: 0 }}
                                             animate={{ x: 0, opacity: 1 }}
-                                            transition={{ duration: 0.2 }}
-                                            className={`grid grid-cols-12 gap-2 px-4 py-2 border-b border-white/5 hover:bg-white/5 transition-colors items-center ${item.severity === 'CRITICAL' ? 'bg-red-500/5' : ''
-                                                }`}
+                                            transition={{ duration: 0.15 }}
+                                            className={`grid grid-cols-12 gap-2 px-4 py-2 border-b border-white/5 hover:bg-white/5 transition-colors items-center ${item.severity === 'CRITICAL' ? 'bg-red-500/5' : ''}`}
                                         >
                                             <div className="col-span-2 text-gray-500">{item.timestamp}</div>
                                             <div className={`col-span-2 font-bold ${agentColor}`}>{agentName}</div>
@@ -413,6 +454,8 @@ const Dashboard = ({ navigate }) => {
                                             <div className="col-span-1">
                                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.severity === 'CRITICAL' ? 'bg-red-500 text-black' :
                                                     item.severity === 'HIGH' ? 'bg-orange-500 text-black' :
+                                                        item.severity === 'MEDIUM' ? 'bg-yellow-500 text-black' :
+                                                        item.severity === 'LOW' ? 'bg-green-500 text-black' :
                                                         'bg-blue-500 text-black'
                                                     }`}>
                                                     {item.severity}
@@ -435,7 +478,7 @@ const Dashboard = ({ navigate }) => {
                 </main>
 
                 <footer className="w-full text-center py-6 text-xs text-gray-600 relative z-10">
-                    Antigravity API Endpoint Scanning System
+                    VigilAgent API Endpoint Scanning System
                 </footer>
             </div>
         </div>

@@ -543,16 +543,20 @@ class ReportGenerator:
                 categories.setdefault(res['category'], []).append(res)
 
             finding_count = 0
-            for cat_name, cat_findings in categories.items():
+            for cat_idx, (cat_name, cat_findings) in enumerate(categories.items()):
+                # Each category starts on a new page (except the very first which is already on the Detailed Findings page)
+                if cat_idx > 0:
+                    pdf.add_page()
                 pdf.add_filter_header(cat_name)
                 
-                for res in cat_findings:
+                for f_idx, res in enumerate(cat_findings):
                     finding_count += 1
                     v = res['event']
                     
-                    # --- Each finding on a NEW PAGE (after the first in category) ---
-                    if finding_count > 1:
+                    # --- Each finding on a NEW PAGE with its filter header (after the first in category) ---
+                    if f_idx > 0:
                         pdf.add_page()
+                        pdf.add_filter_header(cat_name)
                     
                     payload = v.get('payload', {})
                     v_type = str(payload.get('type', 'UNKNOWN')).upper()

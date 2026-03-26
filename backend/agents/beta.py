@@ -98,31 +98,38 @@ class BetaAgent(BaseAgent):
         payloads = data["generated_payloads"]
         print(f"[{self.name}] Intercepted {len(payloads)} payloads from Sigma. Commencing RL Adaptive Execution.")
         
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            for p in payloads:
-                await self.bus.publish(HiveEvent(
-                    type=EventType.LIVE_ATTACK,
-                    source=self.name,
-                    payload={"url": target_url, "arsenal": "Adaptive Fuzzer", "action": "Executing Payload", "payload": p[:50]}
-                ))
-                
-                # Try Original Payload
-                reward = await self._execute_and_eval(session, target_url, p)
-                
-                # ADAPTIVE REINFORCEMENT LEARNING
-                if reward > 0:
-                    print(f"[{self.name}] [+ REWARD] Successful payload interaction. Retaining strategy.")
-                else:
-                    print(f"[{self.name}] [- PENALTY] Payload failed. Executing AI mutation layer.")
-                    mutated = await self.waf_mutate(p)
-                    if mutated != p:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                for p in payloads:
+                    try:
                         await self.bus.publish(HiveEvent(
                             type=EventType.LIVE_ATTACK,
                             source=self.name,
-                            payload={"url": target_url, "arsenal": "RL Mutation", "action": "Retrying Mutated Payload", "payload": mutated[:50]}
+                            payload={"url": target_url, "arsenal": "Adaptive Fuzzer", "action": "Executing Payload", "payload": p[:50]}
                         ))
-                        await self._execute_and_eval(session, target_url, mutated)
+                        
+                        # Try Original Payload
+                        reward = await self._execute_and_eval(session, target_url, p)
+                        
+                        # ADAPTIVE REINFORCEMENT LEARNING
+                        if reward > 0:
+                            print(f"[{self.name}] [+ REWARD] Successful payload interaction. Retaining strategy.")
+                        else:
+                            print(f"[{self.name}] [- PENALTY] Payload failed. Executing AI mutation layer.")
+                            mutated = await self.waf_mutate(p)
+                            if mutated != p:
+                                await self.bus.publish(HiveEvent(
+                                    type=EventType.LIVE_ATTACK,
+                                    source=self.name,
+                                    payload={"url": target_url, "arsenal": "RL Mutation", "action": "Retrying Mutated Payload", "payload": mutated[:50]}
+                                ))
+                                await self._execute_and_eval(session, target_url, mutated)
+                    except Exception as payload_err:
+                        print(f"[{self.name}] [PAYLOAD ERROR] Skipping payload: {payload_err}")
+                        continue
+        except Exception as session_err:
+            print(f"[{self.name}] [SESSION ERROR] Failed to create HTTP session: {session_err}")
 
     async def _execute_and_eval(self, session, url: str, p: str):
         """Executes a payload against a target URL and returns an RL reward score."""
